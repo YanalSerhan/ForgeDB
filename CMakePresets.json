@@ -1,0 +1,98 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "installDir": "${sourceDir}/out/install/${presetName}",
+      "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+      "architecture": { "value": "x64", "strategy": "external" },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "VCPKG_TARGET_TRIPLET": "x64-windows-static-md",
+        "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/triplets",
+        "FORGEDB_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "msvc",
+      "hidden": true,
+      "inherits": "base",
+      "cacheVariables": { "CMAKE_CXX_COMPILER": "cl" },
+      "vendor": {
+        "microsoft.com/VisualStudioSettings/CMake/1.0": { "intelliSenseMode": "windows-msvc-x64" }
+      }
+    },
+    {
+      "name": "clangcl",
+      "hidden": true,
+      "inherits": "base",
+      "cacheVariables": { "CMAKE_CXX_COMPILER": "clang-cl" },
+      "vendor": {
+        "microsoft.com/VisualStudioSettings/CMake/1.0": { "intelliSenseMode": "windows-clang-x64" }
+      }
+    },
+    {
+      "name": "cfg-debug",
+      "hidden": true,
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "FORGEDB_ENABLE_ASSERTS": "ON" }
+    },
+    {
+      "name": "cfg-release",
+      "hidden": true,
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "FORGEDB_BUILD_BENCH": "ON" }
+    },
+    {
+      "name": "cfg-asan",
+      "hidden": true,
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "FORGEDB_ENABLE_ASSERTS": "ON",
+        "FORGEDB_SANITIZE": "address",
+        "VCPKG_TARGET_TRIPLET": "x64-windows-static-md-asan"
+      }
+    },
+    { "name": "msvc-debug", "displayName": "MSVC Debug", "inherits": ["cfg-debug", "msvc"] },
+    { "name": "msvc-release", "displayName": "MSVC Release (+ microbenchmarks)", "inherits": ["cfg-release", "msvc"] },
+    { "name": "msvc-asan", "displayName": "MSVC AddressSanitizer", "inherits": ["cfg-asan", "msvc"] },
+    { "name": "clangcl-debug", "displayName": "clang-cl Debug", "inherits": ["cfg-debug", "clangcl"] },
+    { "name": "clangcl-asan", "displayName": "clang-cl AddressSanitizer", "inherits": ["cfg-asan", "clangcl"] },
+    {
+      "name": "clangcl-fuzz",
+      "displayName": "clang-cl libFuzzer + ASan",
+      "inherits": "clangcl",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "FORGEDB_ENABLE_ASSERTS": "ON",
+        "FORGEDB_SANITIZE": "fuzzer",
+        "FORGEDB_BUILD_TESTS": "OFF",
+        "FORGEDB_BUILD_FUZZ": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "msvc-debug", "configurePreset": "msvc-debug" },
+    { "name": "msvc-release", "configurePreset": "msvc-release" },
+    { "name": "msvc-asan", "configurePreset": "msvc-asan" },
+    { "name": "clangcl-debug", "configurePreset": "clangcl-debug" },
+    { "name": "clangcl-asan", "configurePreset": "clangcl-asan" },
+    { "name": "clangcl-fuzz", "configurePreset": "clangcl-fuzz" }
+  ],
+  "testPresets": [
+    {
+      "name": "test-base",
+      "hidden": true,
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    },
+    { "name": "msvc-debug", "inherits": "test-base", "configurePreset": "msvc-debug" },
+    { "name": "msvc-release", "inherits": "test-base", "configurePreset": "msvc-release" },
+    { "name": "msvc-asan", "inherits": "test-base", "configurePreset": "msvc-asan" },
+    { "name": "clangcl-debug", "inherits": "test-base", "configurePreset": "clangcl-debug" },
+    { "name": "clangcl-asan", "inherits": "test-base", "configurePreset": "clangcl-asan" }
+  ]
+}

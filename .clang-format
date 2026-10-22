@@ -1,0 +1,33 @@
+---
+# Google C++ style (the style LevelDB and RocksDB use), with a wider line.
+Language: Cpp
+BasedOnStyle: Google
+Standard: c++20
+ColumnLimit: 100
+DerivePointerAlignment: false
+PointerAlignment: Left
+
+# Include order: own header, C and Win32 headers, C++ standard library,
+# third-party (gtest, benchmark), ForgeDB public headers, ForgeDB internal headers.
+# <windows.h> must come before other Win32 headers that depend on it, so it
+# gets the lowest sort key inside the C/Win32 group.
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^<windows\.h>$'
+    Priority: 1
+    SortPriority: 1
+  - Regex: '^<(gtest|gmock|benchmark)/'
+    Priority: 3
+  - Regex: '^<[A-Za-z0-9_]+\.h>$'
+    Priority: 1
+    SortPriority: 2
+  - Regex: '^<[A-Za-z0-9_]+>$'
+    Priority: 2
+    SortPriority: 3
+  - Regex: '^"forgedb/'
+    Priority: 4
+    SortPriority: 4
+  - Regex: '^"'
+    Priority: 5
+    SortPriority: 5
+...

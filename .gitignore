@@ -1,0 +1,35 @@
+# Build output (CMake presets put everything under out/)
+out/
+build/
+vcpkg_installed/
+CMakeUserPresets.json
+compile_commands.json
+
+# IDEs
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# Test databases and scratch data created by test runs
+testdb*/
+*.forgedb/
+tmp/
+
+# Fuzzer output (seed corpora under fuzz/corpus/ ARE tracked)
+crash-*
+leak-*
+oom-*
+timeout-*
+slow-unit-*
+
+# Coverage (OpenCppCoverage) and profiling
+coverage/
+*.cov
+LastCoverageResults.log
+*.etl
+*.diagsession
+
+# Benchmark results (charts and docs are tracked; raw runs are not)
+bench/results/

@@ -1,0 +1,13 @@
+# Normalize text files to LF in the repository; Git converts on checkout as configured.
+* text=auto
+
+# Windows scripts keep CRLF.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary test fixtures and fuzz corpora must never be line-ending converted:
+# one rewritten byte would change a checksum and break the test.
+tests/data/** binary
+fuzz/corpus/** binary
+*.sst binary

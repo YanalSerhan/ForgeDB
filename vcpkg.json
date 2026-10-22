@@ -1,0 +1,21 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "forgedb",
+  "version-semver": "0.1.0",
+  "description": "Crash-safe embedded LSM-tree key-value storage engine for Windows.",
+  "builtin-baseline": "9eec002df1cd109f8f104cd966a763daf9751489",
+  "features": {
+    "tests": {
+      "description": "GoogleTest, for the test suites (CMake: FORGEDB_BUILD_TESTS)",
+      "dependencies": [ "gtest" ]
+    },
+    "microbench": {
+      "description": "Google Benchmark, for microbenchmarks (CMake: FORGEDB_BUILD_BENCH)",
+      "dependencies": [ "benchmark" ]
+    },
+    "bench": {
+      "description": "Comparison engines for tools/forgedb_bench (Phase 5)",
+      "dependencies": [ "leveldb", "rocksdb", "sqlite3" ]
+    }
+  }
+}

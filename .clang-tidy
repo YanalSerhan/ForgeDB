@@ -1,0 +1,75 @@
+---
+# Broad check families, minus the ones that fight a storage engine's job.
+# Every disabled check has a reason:
+#   bugprone-easily-swappable-parameters    fires on almost every (offset, length) pair
+#   cppcoreguidelines/readability-magic-numbers  file formats are full of byte widths;
+#                                            meaningful constants get names anyway
+#   cppcoreguidelines-pro-bounds-pointer-arithmetic,
+#   cppcoreguidelines-pro-bounds-constant-array-index
+#                                            the arena, skip list and byte codecs need it;
+#                                            covered by ASan, fuzzing and length checks
+#   cppcoreguidelines-avoid-do-while         do { } while (0) is the safe macro idiom
+#   misc-include-cleaner                     false positives with <windows.h> and gtest
+#   modernize-use-trailing-return-type       style preference, not a defect
+#   readability-identifier-length            i, n, k are fine in small scopes
+Checks: >
+  -*,
+  bugprone-*,
+  clang-analyzer-*,
+  concurrency-*,
+  cppcoreguidelines-*,
+  misc-*,
+  modernize-*,
+  performance-*,
+  portability-*,
+  readability-*,
+  -bugprone-easily-swappable-parameters,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -readability-magic-numbers,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -cppcoreguidelines-pro-bounds-constant-array-index,
+  -cppcoreguidelines-avoid-do-while,
+  -misc-include-cleaner,
+  -modernize-use-trailing-return-type,
+  -readability-identifier-length
+WarningsAsErrors: '*'
+HeaderFilterRegex: '.*[/\\](include[/\\]forgedb|src|tests|tools|fuzz|bench)[/\\].*'
+FormatStyle: file
+CheckOptions:
+  # Naming follows Google style: Types and Functions in CamelCase,
+  # variables in lower_case, private members with a trailing underscore,
+  # constants as kCamelCase.
+  - { key: readability-identifier-naming.NamespaceCase,          value: lower_case }
+  - { key: readability-identifier-naming.ClassCase,              value: CamelCase }
+  - { key: readability-identifier-naming.StructCase,             value: CamelCase }
+  - { key: readability-identifier-naming.EnumCase,               value: CamelCase }
+  - { key: readability-identifier-naming.EnumConstantCase,       value: CamelCase }
+  - { key: readability-identifier-naming.EnumConstantPrefix,     value: k }
+  - { key: readability-identifier-naming.TypeAliasCase,          value: CamelCase }
+  - { key: readability-identifier-naming.TypedefCase,            value: CamelCase }
+  - { key: readability-identifier-naming.TemplateParameterCase,  value: CamelCase }
+  - { key: readability-identifier-naming.FunctionCase,           value: CamelCase }
+  - { key: readability-identifier-naming.FunctionIgnoredRegexp,  value: '^(main|wmain|LLVMFuzzerTestOneInput|LLVMFuzzerInitialize)$' }
+  - { key: readability-identifier-naming.MethodCase,             value: CamelCase }
+  - { key: readability-identifier-naming.MethodIgnoredRegexp,    value: '^(begin|end|size|data|empty|swap)$' }
+  - { key: readability-identifier-naming.VariableCase,           value: lower_case }
+  - { key: readability-identifier-naming.ParameterCase,          value: lower_case }
+  - { key: readability-identifier-naming.PublicMemberCase,       value: lower_case }
+  - { key: readability-identifier-naming.PrivateMemberCase,      value: lower_case }
+  - { key: readability-identifier-naming.PrivateMemberSuffix,    value: _ }
+  - { key: readability-identifier-naming.ProtectedMemberCase,    value: lower_case }
+  - { key: readability-identifier-naming.ProtectedMemberSuffix,  value: _ }
+  - { key: readability-identifier-naming.ConstexprVariableCase,  value: CamelCase }
+  - { key: readability-identifier-naming.ConstexprVariablePrefix, value: k }
+  - { key: readability-identifier-naming.GlobalConstantCase,     value: CamelCase }
+  - { key: readability-identifier-naming.GlobalConstantPrefix,   value: k }
+  - { key: readability-identifier-naming.StaticConstantCase,     value: CamelCase }
+  - { key: readability-identifier-naming.StaticConstantPrefix,   value: k }
+  - { key: readability-identifier-naming.ClassConstantCase,      value: CamelCase }
+  - { key: readability-identifier-naming.ClassConstantPrefix,    value: k }
+  - { key: readability-identifier-naming.MacroDefinitionCase,    value: UPPER_CASE }
+  - { key: readability-implicit-bool-conversion.AllowPointerConditions, value: true }
+  - { key: readability-function-cognitive-complexity.Threshold,  value: 35 }
+  - { key: misc-non-private-member-variables-in-classes.IgnoreClassesWithAllMemberVariablesBeingPublic, value: true }
+  - { key: cppcoreguidelines-special-member-functions.AllowSoleDefaultDtor, value: true }
+...

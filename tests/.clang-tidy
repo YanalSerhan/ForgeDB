@@ -1,0 +1,12 @@
+---
+# Tests inherit the root config, minus checks that GoogleTest's macros trip
+# by design (TEST() defines globals and classes with generated names).
+InheritParentConfig: true
+Checks: >
+  -cppcoreguidelines-avoid-non-const-global-variables,
+  -cppcoreguidelines-owning-memory,
+  -cppcoreguidelines-special-member-functions,
+  -readability-function-cognitive-complexity
+CheckOptions:
+  - { key: readability-identifier-naming.ClassIgnoredRegexp, value: '.*_Test$' }
+...
