@@ -1,0 +1,14 @@
+---
+# Benchmarks inherit the root config, minus what Google Benchmark's conventions
+# trip by design: BM_ function names, the `for (auto _ : state)` loop variable,
+# and BENCHMARK() registering itself through namespace-scope variables. Fixed
+# seeds keep benchmark inputs identical between runs.
+InheritParentConfig: true
+Checks: >
+  -cppcoreguidelines-avoid-non-const-global-variables,
+  -bugprone-random-generator-seed,
+  -clang-analyzer-deadcode.DeadStores
+CheckOptions:
+  - { key: readability-identifier-naming.FunctionIgnoredRegexp, value: '^(main|BM_[A-Za-z0-9]+)$' }
+  - { key: readability-identifier-naming.VariableIgnoredRegexp, value: '^(_|_benchmark_.*)$' }
+...

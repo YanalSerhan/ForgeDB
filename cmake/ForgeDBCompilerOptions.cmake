@@ -56,8 +56,12 @@ function(forgedb_target_defaults target)
     set_target_properties(${target} PROPERTIES CXX_CLANG_TIDY "${FORGEDB_CLANG_TIDY_EXE}")
   endif()
 
-  if(FORGEDB_ENABLE_MSVC_ANALYZE AND FORGEDB_COMPILER_MSVC)
-    # /analyze:external- skips analysis of headers included as external (vcpkg, SDK).
+  # /analyze runs on the library only: on test and benchmark files it mostly
+  # analyzes GoogleTest's and Google Benchmark's macro expansions. clang-tidy
+  # still checks those files. /analyze:external- skips external headers (vcpkg,
+  # Windows SDK); /WX makes its warnings errors.
+  get_target_property(_forgedb_target_type ${target} TYPE)
+  if(FORGEDB_ENABLE_MSVC_ANALYZE AND FORGEDB_COMPILER_MSVC AND _forgedb_target_type STREQUAL "STATIC_LIBRARY")
     target_compile_options(${target} PRIVATE /analyze /analyze:external-)
   endif()
 

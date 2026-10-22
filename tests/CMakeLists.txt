@@ -4,6 +4,11 @@ include(GoogleTest)
 # One executable for all unit tests; model, crash, corruption and stress
 # suites get their own executables in later phases.
 add_executable(forgedb_unit_tests
+  unit/check_test.cpp
+  unit/coding_test.cpp
+  unit/crc32c_test.cpp
+  unit/result_test.cpp
+  unit/status_test.cpp
   unit/version_test.cpp
 )
 target_link_libraries(forgedb_unit_tests PRIVATE forgedb::forgedb GTest::gtest_main)

@@ -28,9 +28,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # clangcl-fuzz has no tests yet; building it keeps the preset from rotting
-        # until the fuzz smoke job arrives in Phase 2.7.
-        preset: [msvc-debug, msvc-release, msvc-asan, clangcl-debug, clangcl-asan, clangcl-fuzz]
+        # clangcl-tidy and msvc-analyze are static analysis (build only, warnings
+        # are errors). clangcl-fuzz has no tests yet; building it keeps the preset
+        # from rotting until the fuzz smoke job arrives in Phase 2.7.
+        preset: [msvc-debug, msvc-release, msvc-asan, clangcl-debug, clangcl-asan,
+                 clangcl-tidy, msvc-analyze, clangcl-fuzz]
     steps:
       - uses: actions/checkout@v7
 

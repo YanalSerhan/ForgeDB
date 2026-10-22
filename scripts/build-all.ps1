@@ -5,7 +5,8 @@
 .DESCRIPTION
   - Sets up the x64 Visual Studio developer environment itself if needed.
   - Runs: cmake --preset P, cmake --build --preset P, ctest --preset P
-    (the test step runs only for presets that have a test preset; clangcl-fuzz has none).
+    (the test step runs only for presets that have a test preset: clangcl-tidy,
+    msvc-analyze and clangcl-fuzz are build-only).
   - Keeps going after a failure unless -StopOnFailure is given.
   - Writes every step's full output to out\logs\<preset>-<step>.log.
   - Prints a summary table and exits with 1 if anything failed.
@@ -22,7 +23,8 @@
 #>
 [CmdletBinding()]
 param(
-    [string[]] $Presets = @('msvc-debug', 'msvc-release', 'msvc-asan', 'clangcl-debug', 'clangcl-asan', 'clangcl-fuzz'),
+    [string[]] $Presets = @('msvc-debug', 'msvc-release', 'msvc-asan', 'clangcl-debug', 'clangcl-asan',
+                           'clangcl-tidy', 'msvc-analyze', 'clangcl-fuzz'),
     [switch] $Clean,
     [switch] $StopOnFailure,
     # Configure and build only (used by the CI coverage job, which runs the tests itself).

@@ -48,11 +48,12 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - [ ] Fuzz smoke job (clang-cl): 60 seconds per target on each PR (from Phase 2 on) (deferred to 2.7, when the first fuzz targets exist)
 
 ### 0.3 Utilities
-- [ ] `Status` (code + message) and `Result<T>` (value or `Status`), both `[[nodiscard]]`
-- [ ] Little-endian fixed32/fixed64 encode/decode; varint32/varint64 encode/decode with bounds checks
-- [ ] CRC32C: table-driven implementation + SSE4.2 fast path (`_mm_crc32_u64`), chosen at runtime via `__cpuid`
-- [ ] CRC32C tests against published test vectors; both paths must agree on random buffers
-- [ ] Microbenchmark: CRC32C MB/s, table vs SSE4.2
+> `[~]` items: all tests pass on Linux stand-in builds (clang, gcc, ASan+UBSan); waiting for the Windows run (MSVC, clang-cl, clang-tidy, /analyze) and the first benchmark numbers.
+- [~] `Status` (code + message) and `Result<T>` (value or `Status`), both `[[nodiscard]]` (+ `FORGEDB_RETURN_IF_ERROR`, `FORGEDB_ASSIGN_OR_RETURN`, and `FORGEDB_CHECK`/`FORGEDB_DCHECK` in `forgedb/check.h`)
+- [~] Little-endian fixed32/fixed64 encode/decode; varint32/varint64 encode/decode with bounds checks (also length-prefixed bytes; overflowing varints rejected)
+- [~] CRC32C: table-driven implementation + SSE4.2 fast path (`_mm_crc32_u64`), chosen at runtime via `__cpuid` (+ LevelDB-style `Mask`/`Unmask` for stored CRCs)
+- [~] CRC32C tests against published test vectors; both paths must agree on random buffers
+- [~] Microbenchmark: CRC32C MB/s, table vs SSE4.2 (`bench/crc32c_bench.cpp`; waiting for the first real run)
 
 ### 0.4 FileSystem layer
 - [ ] Interfaces in `src/env/`: `WritableFile` (Append, Flush, Sync, Close), `SequentialFile` (Read, Skip), `RandomAccessFile` (positional Read), `FileLock`
@@ -74,7 +75,7 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - [ ] `docs/adr/0000-template.md` (context, decision, alternatives, consequences)
 - [ ] ADR 0001: Windows-only scope and toolchain
 - [ ] ADR 0002: durability rules on Windows (`FlushFileBuffers`, write-through rename, no directory fsync, MANIFEST lists every live file); link each claim to Microsoft's API documentation
-- [ ] `docs/file-formats.md` skeleton
+- [x] `docs/file-formats.md` skeleton (created in 0.3 with the primitive encodings and CRC-32C, per the "document every byte format with its code" rule)
 
 ### ✅ Exit gate — Phase 0
 - [ ] All CI jobs green on `main`

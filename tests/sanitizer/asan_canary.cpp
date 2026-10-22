@@ -14,7 +14,7 @@ int main(int argc, char** /*argv*/) {
   // argc is 1 under ctest, so index == 16 (one past the end). Deriving it from
   // argc keeps the compiler from proving the write is out of bounds at compile
   // time, and the volatile pointer keeps it from deleting the store.
-  const auto index = static_cast<std::size_t>(15 + argc);
+  const std::size_t index = std::size_t{15} + static_cast<std::size_t>(argc);
   volatile char* bytes = buffer.data();
   bytes[index] = 'x';
   std::puts("FAIL: AddressSanitizer did not report the out-of-bounds write");

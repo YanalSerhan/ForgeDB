@@ -55,9 +55,12 @@ ctest --preset msvc-debug
 | `msvc-asan`     | MSVC     | RelWithDebInfo | AddressSanitizer, assertions on         |
 | `clangcl-debug` | clang-cl | Debug          | assertions on                           |
 | `clangcl-asan`  | clang-cl | RelWithDebInfo | AddressSanitizer, assertions on         |
+| `clangcl-tidy`  | clang-cl | Debug          | clang-tidy on every file; build only    |
+| `msvc-analyze`  | MSVC     | Debug          | `/analyze` on the library; build only   |
 | `clangcl-fuzz`  | clang-cl | RelWithDebInfo | libFuzzer + ASan; library and fuzz targets only |
 
-Build output goes to `out/build/<preset>/`.
+Build output goes to `out/build/<preset>/`. Microbenchmarks (release preset only):
+`out\build\msvc-release\bench\forgedb_microbench.exe`.
 
 To configure, build and test **every** preset in one go (it sets up the x64 developer environment
 itself, prints a summary table and writes logs to `out\logs\`):

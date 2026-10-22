@@ -12,6 +12,11 @@
 #   misc-include-cleaner                     false positives with <windows.h> and gtest
 #   modernize-use-trailing-return-type       style preference, not a defect
 #   readability-identifier-length            i, n, k are fine in small scopes
+#   portability-avoid-pragma-once            ForgeDB targets only MSVC and clang-cl, which both
+#                                            support #pragma once (the Windows convention)
+#   cppcoreguidelines-pro-bounds-avoid-unchecked-container-access
+#                                            bans [] on std::array/string_view; the alternative
+#                                            .at() throws. Indices are masked or checked first
 Checks: >
   -*,
   bugprone-*,
@@ -31,7 +36,9 @@ Checks: >
   -cppcoreguidelines-avoid-do-while,
   -misc-include-cleaner,
   -modernize-use-trailing-return-type,
-  -readability-identifier-length
+  -readability-identifier-length,
+  -portability-avoid-pragma-once,
+  -cppcoreguidelines-pro-bounds-avoid-unchecked-container-access
 WarningsAsErrors: '*'
 HeaderFilterRegex: '.*[/\\](include[/\\]forgedb|src|tests|tools|fuzz|bench)[/\\].*'
 FormatStyle: file
@@ -51,7 +58,9 @@ CheckOptions:
   - { key: readability-identifier-naming.FunctionCase,           value: CamelCase }
   - { key: readability-identifier-naming.FunctionIgnoredRegexp,  value: '^(main|wmain|LLVMFuzzerTestOneInput|LLVMFuzzerInitialize)$' }
   - { key: readability-identifier-naming.MethodCase,             value: CamelCase }
-  - { key: readability-identifier-naming.MethodIgnoredRegexp,    value: '^(begin|end|size|data|empty|swap)$' }
+  # Lower-case accessors, matching the standard library and std::expected:
+  # Status::ok()/code()/message(), Result::ok()/value()/status().
+  - { key: readability-identifier-naming.MethodIgnoredRegexp,    value: '^(begin|end|size|data|empty|swap|ok|code|message|value|status)$' }
   - { key: readability-identifier-naming.VariableCase,           value: lower_case }
   - { key: readability-identifier-naming.ParameterCase,          value: lower_case }
   - { key: readability-identifier-naming.PublicMemberCase,       value: lower_case }

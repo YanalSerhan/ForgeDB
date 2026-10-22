@@ -10,6 +10,10 @@ configure_file(
 
 add_library(forgedb STATIC
   db/version.cpp
+  util/check.cpp
+  util/coding.cpp
+  util/crc32c.cpp
+  util/status.cpp
 )
 add_library(forgedb::forgedb ALIAS forgedb)
 

@@ -62,6 +62,18 @@
     { "name": "clangcl-debug", "displayName": "clang-cl Debug", "inherits": ["cfg-debug", "clangcl"] },
     { "name": "clangcl-asan", "displayName": "clang-cl AddressSanitizer", "inherits": ["cfg-asan", "clangcl"] },
     {
+      "name": "clangcl-tidy",
+      "displayName": "clang-cl + clang-tidy (static analysis; builds everything, runs no tests)",
+      "inherits": ["cfg-debug", "clangcl"],
+      "cacheVariables": { "FORGEDB_ENABLE_CLANG_TIDY": "ON", "FORGEDB_BUILD_BENCH": "ON" }
+    },
+    {
+      "name": "msvc-analyze",
+      "displayName": "MSVC /analyze (static analysis of the library; runs no tests)",
+      "inherits": ["cfg-debug", "msvc"],
+      "cacheVariables": { "FORGEDB_ENABLE_MSVC_ANALYZE": "ON" }
+    },
+    {
       "name": "clangcl-fuzz",
       "displayName": "clang-cl libFuzzer + ASan",
       "inherits": "clangcl",
@@ -80,6 +92,8 @@
     { "name": "msvc-asan", "configurePreset": "msvc-asan" },
     { "name": "clangcl-debug", "configurePreset": "clangcl-debug" },
     { "name": "clangcl-asan", "configurePreset": "clangcl-asan" },
+    { "name": "clangcl-tidy", "configurePreset": "clangcl-tidy" },
+    { "name": "msvc-analyze", "configurePreset": "msvc-analyze" },
     { "name": "clangcl-fuzz", "configurePreset": "clangcl-fuzz" }
   ],
   "testPresets": [
