@@ -14,3 +14,14 @@ forgedb_target_defaults(forgedb_unit_tests)
 # PRE_TEST: list the tests when ctest runs, not at build time, so a build
 # never depends on being able to start the test executable.
 gtest_discover_tests(forgedb_unit_tests DISCOVERY_MODE PRE_TEST)
+
+# ASan canary (sanitizer builds only): a program that overflows a heap buffer
+# on purpose. The test passes only if ASan's report appears, which proves the
+# sanitizer is actually active. Exit code is ignored; the report is the signal.
+if(FORGEDB_ASAN)
+  add_executable(forgedb_asan_canary sanitizer/asan_canary.cpp)
+  forgedb_target_defaults(forgedb_asan_canary)
+  add_test(NAME AsanCanary.ReportsHeapBufferOverflow COMMAND forgedb_asan_canary)
+  set_tests_properties(AsanCanary.ReportsHeapBufferOverflow PROPERTIES
+    PASS_REGULAR_EXPRESSION "ERROR: AddressSanitizer: heap-buffer-overflow")
+endif()

@@ -1,9 +1,7 @@
 # ForgeDB
 
-<!-- Badge placeholders: replaced with real GitHub Actions badges in Phase 0.2 / Phase 6. -->
-![build](https://img.shields.io/badge/build-pending-lightgrey)
-![tests](https://img.shields.io/badge/tests-pending-lightgrey)
-![asan](https://img.shields.io/badge/ASan-pending-lightgrey)
+[![CI](https://github.com/YanalSerhan/ForgeDB/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/YanalSerhan/ForgeDB/actions/workflows/ci.yml)
+<!-- Placeholders until Phase 1 (coverage gate) and Phase 2 (fuzz smoke job). -->
 ![coverage](https://img.shields.io/badge/coverage-pending-lightgrey)
 ![fuzz](https://img.shields.io/badge/fuzz-pending-lightgrey)
 
@@ -68,6 +66,21 @@ itself, prints a summary table and writes logs to `out\logs\`):
 powershell -ExecutionPolicy Bypass -File scripts\build-all.ps1
 powershell -ExecutionPolicy Bypass -File scripts\build-all.ps1 -Presets msvc-debug,clangcl-asan -Clean
 ```
+
+Other scripts (same environment setup, usable locally and in CI):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\check-format.ps1        # add -Fix to reformat
+powershell -ExecutionPolicy Bypass -File scripts\coverage.ps1            # after building msvc-debug;
+                                                                         # needs: choco install opencppcoverage
+```
+
+## Continuous integration
+
+GitHub Actions on `windows-2025-vs2026` (`.github/workflows/ci.yml`): one job per preset running
+`scripts\build-all.ps1`, a coverage job (OpenCppCoverage, report uploaded as an artifact), and a
+clang-format check. vcpkg packages are cached between runs. ASan builds include a canary test
+that overflows a heap buffer on purpose and passes only if ASan reports it.
 
 **Troubleshooting.** Other toolchains on `PATH` can shadow Visual Studio's tools; Strawberry Perl,
 for example, ships its own `cmake.exe`, `ninja.exe`, `gcc` and `ld.exe`. `build-all.ps1` puts

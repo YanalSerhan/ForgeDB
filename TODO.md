@@ -32,20 +32,20 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 ## Phase 0 — Foundations (≈1 week)
 
 ### 0.1 Repository and build
-> `[~]` items: written and checked off Windows; waiting for the first real build on Windows.
-- [x] Create repo `forgedb` with the layout: `include/forgedb/`, `src/{env,util,memtable,log,table,db}`, `tools/`, `tests/{unit,model,crash,corruption,stress}`, `fuzz/`, `docs/{adr}`, `.github/workflows/` (added: `cmake/` for build modules, `bench/` for microbenchmarks)
-- [~] Top-level `CMakeLists.txt`: C++20, static library target `forgedb`, `FORGEDB_BUILD_TESTS`, `FORGEDB_BUILD_BENCH`, `FORGEDB_BUILD_FUZZ` options
-- [~] `CMakePresets.json`: `msvc-debug`, `msvc-release`, `msvc-asan`, `clangcl-debug`, `clangcl-asan`, `clangcl-fuzz`
-- [~] `vcpkg.json` manifest with pinned baseline: `gtest`, `benchmark`; a `bench` feature with `rocksdb`, `leveldb`, `sqlite3` (proposed change: `gtest` and `benchmark` are features `tests` / `microbench`, switched on by the matching CMake options)
+- [x] Create repo `forgedb` with the layout: `include/forgedb/`, `src/{env,util,memtable,log,table,db}`, `tools/`, `tests/{unit,model,crash,corruption,stress}`, `fuzz/`, `docs/{adr}`, `.github/workflows/` (added: `cmake/` build modules, `bench/` microbenchmarks, `triplets/` vcpkg overlay triplets, `scripts/` dev scripts)
+- [x] Top-level `CMakeLists.txt`: C++20, static library target `forgedb`, `FORGEDB_BUILD_TESTS`, `FORGEDB_BUILD_BENCH`, `FORGEDB_BUILD_FUZZ` options
+- [x] `CMakePresets.json`: `msvc-debug`, `msvc-release`, `msvc-asan`, `clangcl-debug`, `clangcl-asan`, `clangcl-fuzz`
+- [x] `vcpkg.json` manifest with pinned baseline: `gtest`, `benchmark`; a `bench` feature with `rocksdb`, `leveldb`, `sqlite3` (`gtest` and `benchmark` are features `tests` / `microbench`, switched on by the matching CMake options; ASan presets use the overlay triplet `triplets/x64-windows-static-md-asan` built with `_ANNOTATE_STL`)
 - [x] `.clang-format`, `.clang-tidy`, `.gitignore` (`out/`, `build/`, `.vs/`, test databases)
 - [x] `README.md` stub: one paragraph, build steps on Windows, badge placeholders
 
 ### 0.2 Continuous integration (GitHub Actions, Windows runners only)
-- [ ] Matrix: MSVC × {debug, release, asan} and clang-cl × {debug, asan}
-- [ ] Cache vcpkg binary packages between runs
-- [ ] `ctest --output-on-failure` in every job; upload logs on failure
-- [ ] Coverage job with OpenCppCoverage; publish the report as an artifact; gate at 85% from Phase 1 on
-- [ ] Fuzz smoke job (clang-cl): 60 seconds per target on each PR (from Phase 2 on)
+> `[~]` items: written and checked locally; waiting for the first green run on GitHub.
+- [~] Matrix: MSVC × {debug, release, asan} and clang-cl × {debug, asan} (plus a `clangcl-fuzz` build-only entry so that preset can't rot before 2.7; added: ASan canary test, clang-format job)
+- [~] Cache vcpkg binary packages between runs (vcpkg `files` provider + `actions/cache`; the old `x-gha` provider was removed from vcpkg)
+- [~] `ctest --output-on-failure` in every job; upload logs on failure
+- [~] Coverage job with OpenCppCoverage; publish the report as an artifact; gate at 85% from Phase 1 on (gate is `COVERAGE_MIN_LINE_PERCENT` in ci.yml: 0 now, set to 85 when Phase 1 starts)
+- [ ] Fuzz smoke job (clang-cl): 60 seconds per target on each PR (from Phase 2 on) (deferred to 2.7, when the first fuzz targets exist)
 
 ### 0.3 Utilities
 - [ ] `Status` (code + message) and `Result<T>` (value or `Status`), both `[[nodiscard]]`

@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same PR cancels the older run; runs on main always finish.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Coverage gate. TODO.md 0.2: report-only during Phase 0, raise to 85 from Phase 1 on.
+  COVERAGE_MIN_LINE_PERCENT: 0
+
+jobs:
+  build:
+    name: ${{ matrix.preset }}
+    # Pinned image (not windows-latest): Windows Server 2025 + Visual Studio 2026,
+    # the same Visual Studio generation used for local development.
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # clangcl-fuzz has no tests yet; building it keeps the preset from rotting
+        # until the fuzz smoke job arrives in Phase 2.7.
+        preset: [msvc-debug, msvc-release, msvc-asan, clangcl-debug, clangcl-asan, clangcl-fuzz]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/setup-vcpkg
+        with:
+          cache-key: ${{ matrix.preset }}
+
+      # Same script as local development: configure, build, ctest --output-on-failure.
+      - name: Configure, build and test
+        shell: pwsh
+        run: ./scripts/build-all.ps1 -Presets ${{ matrix.preset }} -VcpkgRoot $env:VCPKG_ROOT
+
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: logs-${{ matrix.preset }}
+          if-no-files-found: ignore
+          path: |
+            out/logs/
+            out/build/${{ matrix.preset }}/Testing/Temporary/
+            out/build/${{ matrix.preset }}/vcpkg-manifest-install.log
+            ${{ runner.temp }}/vcpkg/buildtrees/*/*.log
+
+  coverage:
+    name: coverage (msvc-debug)
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/setup-vcpkg
+        with:
+          cache-key: msvc-debug
+
+      - name: Install OpenCppCoverage
+        shell: pwsh
+        run: choco install opencppcoverage --no-progress -y
+
+      - name: Build (tests run under coverage in the next step)
+        shell: pwsh
+        run: ./scripts/build-all.ps1 -Presets msvc-debug -SkipTests -VcpkgRoot $env:VCPKG_ROOT
+
+      - name: Run tests under OpenCppCoverage
+        shell: pwsh
+        run: ./scripts/coverage.ps1 -Preset msvc-debug -MinLinePercent $env:COVERAGE_MIN_LINE_PERCENT
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-report
+          if-no-files-found: ignore
+          path: out/coverage/msvc-debug/
+
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: logs-coverage
+          if-no-files-found: ignore
+          path: out/logs/
+
+  format:
+    name: clang-format
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check formatting
+        shell: pwsh
+        run: ./scripts/check-format.ps1

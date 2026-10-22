@@ -1,0 +1,51 @@
+name: Set up vcpkg
+description: >
+  Clone vcpkg at the exact commit pinned by vcpkg.json's builtin-baseline,
+  bootstrap it, and restore vcpkg's binary cache (prebuilt gtest, benchmark, ...)
+  so dependencies are only rebuilt when something relevant changes.
+
+inputs:
+  cache-key:
+    description: Separates caches of jobs that build different packages (use the preset name).
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # The runner image ships a vcpkg at C:\vcpkg, but at whatever commit the image
+    # was built from; our manifest's baseline may be newer. Fetch exactly the
+    # pinned commit (shallow: only that commit's tree is needed).
+    - name: Clone vcpkg at the manifest baseline
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $baseline = (Get-Content vcpkg.json -Raw | ConvertFrom-Json).'builtin-baseline'
+        $root = Join-Path $env:RUNNER_TEMP 'vcpkg'
+        git init --quiet $root
+        git -C $root fetch --quiet --depth 1 https://github.com/microsoft/vcpkg $baseline
+        if ($LASTEXITCODE) { throw "Could not fetch vcpkg commit $baseline" }
+        git -C $root checkout --quiet FETCH_HEAD
+        & (Join-Path $root 'bootstrap-vcpkg.bat') -disableMetrics
+        if ($LASTEXITCODE) { throw 'bootstrap-vcpkg.bat failed' }
+
+        $cache = Join-Path $env:RUNNER_TEMP 'vcpkg-binary-cache'
+        New-Item -ItemType Directory -Force -Path $cache | Out-Null
+        "VCPKG_ROOT=$root" >> $env:GITHUB_ENV
+        # vcpkg's 'files' provider: packages are stored as zip files in this
+        # folder, which actions/cache saves and restores between runs.
+        "VCPKG_BINARY_SOURCES=clear;files,$cache,readwrite" >> $env:GITHUB_ENV
+        # ImageOS/ImageVersion are machine variables of the hosted runner; copy
+        # them into GITHUB_ENV so the cache key below can use them via env.
+        "VCPKG_CACHE_IMAGE=$($env:ImageOS)-$($env:ImageVersion)" >> $env:GITHUB_ENV
+
+    # Key: preset + runner image version + anything that changes the packages.
+    # A new image (new compiler) or manifest change starts a new cache entry,
+    # seeded from the previous one via restore-keys; vcpkg's own ABI hashes
+    # decide which restored packages are still valid.
+    - name: Restore vcpkg binary cache
+      uses: actions/cache@v6
+      with:
+        path: ${{ runner.temp }}/vcpkg-binary-cache
+        key: vcpkg-${{ inputs.cache-key }}-${{ env.VCPKG_CACHE_IMAGE }}-${{ hashFiles('vcpkg.json', 'triplets/**') }}
+        restore-keys: |
+          vcpkg-${{ inputs.cache-key }}-
