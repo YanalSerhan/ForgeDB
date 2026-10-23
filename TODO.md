@@ -40,11 +40,10 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - [x] `README.md` stub: one paragraph, build steps on Windows, badge placeholders
 
 ### 0.2 Continuous integration (GitHub Actions, Windows runners only)
-> `[~]` items: written and checked locally; waiting for the first green run on GitHub.
-- [~] Matrix: MSVC × {debug, release, asan} and clang-cl × {debug, asan} (plus a `clangcl-fuzz` build-only entry so that preset can't rot before 2.7; added: ASan canary test, clang-format job)
-- [~] Cache vcpkg binary packages between runs (vcpkg `files` provider + `actions/cache`; the old `x-gha` provider was removed from vcpkg)
-- [~] `ctest --output-on-failure` in every job; upload logs on failure
-- [~] Coverage job with OpenCppCoverage; publish the report as an artifact; gate at 85% from Phase 1 on (gate is `COVERAGE_MIN_LINE_PERCENT` in ci.yml: 0 now, set to 85 when Phase 1 starts)
+- [x] Matrix: MSVC × {debug, release, asan} and clang-cl × {debug, asan} (plus a `clangcl-fuzz` build-only entry so that preset can't rot before 2.7; added: ASan canary test, clang-format job)
+- [x] Cache vcpkg binary packages between runs (vcpkg `files` provider + `actions/cache`; the old `x-gha` provider was removed from vcpkg)
+- [x] `ctest --output-on-failure` in every job; upload logs on failure
+- [x] Coverage job with OpenCppCoverage; publish the report as an artifact; gate at 85% from Phase 1 on (gate is `COVERAGE_MIN_LINE_PERCENT` in ci.yml: 0 now, set to 85 when Phase 1 starts)
 - [ ] Fuzz smoke job (clang-cl): 60 seconds per target on each PR (from Phase 2 on) (deferred to 2.7, when the first fuzz targets exist)
 
 ### 0.3 Utilities
@@ -78,25 +77,27 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - [x] `docs/file-formats.md` skeleton (created in 0.3 with the primitive encodings and CRC-32C, per the "document every byte format with its code" rule)
 
 ### ✅ Exit gate — Phase 0
-- [ ] All CI jobs green on `main`
+- [x] All CI jobs green on `main` (confirmed by the project owner, 2026-10-23)
 - [x] Conformance suite passes on both file systems (96/96 with MSVC and clang-cl, 97/97 under ASan, on Windows/NTFS)
-- [ ] ADR 0002 written and reviewed by you line by line
+- [x] ADR 0002 written and reviewed by you line by line (open question on trusting the CURRENT rename still to decide before Phase 3)
 
 ---
 
 ## Phase 1 — Memtable core (≈2 weeks)
 
+> `[~]` items in 1.1-1.2: tests pass on Linux (gcc and clang, ASan+UBSan, asserts on and off) and in the Windows build under Wine; waiting for the MSVC/clang-cl run.
+
 ### 1.1 Arena allocator
-- [ ] Allocates from 4 KiB blocks; large requests (> 1/4 block) get their own block
-- [ ] Aligned allocation for node structs
-- [ ] `MemoryUsage()` tracked atomically (read by other threads)
-- [ ] Unit tests: alignment, large allocations, usage accounting; ASan clean
+- [~] Allocates from 4 KiB blocks; large requests (> 1/4 block) get their own block
+- [~] Aligned allocation for node structs
+- [~] `MemoryUsage()` tracked atomically (read by other threads)
+- [~] Unit tests: alignment, large allocations, usage accounting; ASan clean
 
 ### 1.2 Internal key format
-- [ ] Internal key = user key + 8-byte tag (`sequence << 8 | type`), type ∈ {value, deletion}
-- [ ] Comparator: user key ascending, then sequence **descending** (newest first)
-- [ ] `LookupKey` helper for Get at a given sequence
-- [ ] Unit tests for ordering, including equal user keys and maximum sequence
+- [~] Internal key = user key + 8-byte tag (`sequence << 8 | type`), type ∈ {value, deletion}
+- [~] Comparator: user key ascending, then sequence **descending** (newest first)
+- [~] `LookupKey` helper for Get at a given sequence
+- [~] Unit tests for ordering, including equal user keys and maximum sequence
 
 ### 1.3 Skip list
 - [ ] `template <typename Key, class Comparator> class SkipList`

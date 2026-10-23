@@ -66,6 +66,29 @@ Code: `src/util/crc32c.h`, `src/util/crc32c.cpp`. Tests: `tests/unit/crc32c_test
   record is later checksummed again as part of a larger block. Same scheme as LevelDB.
   Example: `Mask(0xE3069283) = 0xC78AB0E5`.
 
+## Internal key
+
+Code: `src/db/internal_key.h`, `src/db/internal_key.cpp`. Tests: `tests/unit/internal_key_test.cpp`.
+
+Every stored key is an *internal key*: the user key followed by an 8-byte tag.
+
+```
++----------------------+------------------------------------------+
+| user key (n bytes)   | tag: fixed64 = (sequence << 8) | type    |
++----------------------+------------------------------------------+
+```
+
+- `sequence`: 56 bits, at most `2^56 - 1`. Every write gets the next sequence number.
+- `type` (low byte of the tag): `0x00` = deletion (tombstone), `0x01` = value. Any other value is
+  rejected as corruption. These numbers are part of the format and never change.
+- Example: user key `ab`, sequence 5, value: `61 62 01 05 00 00 00 00 00 00`.
+- Ordering: user key ascending, compared as unsigned bytes; then tag descending, so the newest
+  version of a key comes first, and at equal sequence numbers a value comes before a deletion.
+
+**Memtable key** (used inside the memtable and by `LookupKey`): `varint32(n + 8)` followed by the
+internal key. A lookup at snapshot `S` uses tag `(S << 8) | 0x01`, the largest tag at `S`, so it
+sorts just before every version written at or before `S`.
+
 ## Write-ahead log
 
 Phase 2.1.

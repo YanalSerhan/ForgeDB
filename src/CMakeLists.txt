@@ -9,10 +9,12 @@ configure_file(
   @ONLY)
 
 add_library(forgedb STATIC
+  db/internal_key.cpp
   db/version.cpp
   env/mem_file_system.cpp
   env/win_file_system.cpp
   env/win_util.cpp
+  memtable/arena.cpp
   util/check.cpp
   util/coding.cpp
   util/crc32c.cpp
