@@ -48,38 +48,38 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - [ ] Fuzz smoke job (clang-cl): 60 seconds per target on each PR (from Phase 2 on) (deferred to 2.7, when the first fuzz targets exist)
 
 ### 0.3 Utilities
-> `[~]` items: all tests pass on Linux stand-in builds (clang, gcc, ASan+UBSan); waiting for the Windows run (MSVC, clang-cl, clang-tidy, /analyze) and the first benchmark numbers.
-- [~] `Status` (code + message) and `Result<T>` (value or `Status`), both `[[nodiscard]]` (+ `FORGEDB_RETURN_IF_ERROR`, `FORGEDB_ASSIGN_OR_RETURN`, and `FORGEDB_CHECK`/`FORGEDB_DCHECK` in `forgedb/check.h`)
-- [~] Little-endian fixed32/fixed64 encode/decode; varint32/varint64 encode/decode with bounds checks (also length-prefixed bytes; overflowing varints rejected)
-- [~] CRC32C: table-driven implementation + SSE4.2 fast path (`_mm_crc32_u64`), chosen at runtime via `__cpuid` (+ LevelDB-style `Mask`/`Unmask` for stored CRCs)
-- [~] CRC32C tests against published test vectors; both paths must agree on random buffers
-- [~] Microbenchmark: CRC32C MB/s, table vs SSE4.2 (`bench/crc32c_bench.cpp`; waiting for the first real run)
+- [x] `Status` (code + message) and `Result<T>` (value or `Status`), both `[[nodiscard]]` (+ `FORGEDB_RETURN_IF_ERROR`, `FORGEDB_ASSIGN_OR_RETURN`, and `FORGEDB_CHECK`/`FORGEDB_DCHECK` in `forgedb/check.h`)
+- [x] Little-endian fixed32/fixed64 encode/decode; varint32/varint64 encode/decode with bounds checks (also length-prefixed bytes; overflowing varints rejected)
+- [x] CRC32C: table-driven implementation + SSE4.2 fast path (`_mm_crc32_u64`), chosen at runtime via `__cpuid` (+ LevelDB-style `Mask`/`Unmask` for stored CRCs)
+- [x] CRC32C tests against published test vectors; both paths must agree on random buffers
+- [~] Microbenchmark: CRC32C MB/s, table vs SSE4.2 (`bench/crc32c_bench.cpp` builds and runs; numbers to be recorded from the first msvc-release run)
 
 ### 0.4 FileSystem layer
-- [ ] Interfaces in `src/env/`: `WritableFile` (Append, Flush, Sync, Close), `SequentialFile` (Read, Skip), `RandomAccessFile` (positional Read), `FileLock`
-- [ ] `FileSystem` interface: NewWritableFile, NewSequentialFile, NewRandomAccessFile, RenameReplace, DeleteFile, FileExists, GetChildren, GetFileSize, CreateDir, LockFile, UnlockFile
-- [ ] `UniqueHandle`: move-only RAII wrapper around a Win32 `HANDLE`
-- [ ] `WinFileSystem`:
-  - [ ] Paths via `std::filesystem::path` → wide strings (`CreateFileW`)
-  - [ ] Share mode `FILE_SHARE_READ | FILE_SHARE_DELETE` so open files can be deleted
-  - [ ] Positional reads with `ReadFile` + `OVERLAPPED` offset (no shared file pointer, safe across threads)
-  - [ ] Buffered `WritableFile` (e.g., 64 KiB buffer); `Sync` = flush buffer + `FlushFileBuffers`
-  - [ ] `RenameReplace` = `MoveFileExW(..., MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`
-  - [ ] Bounded retry with backoff on `ERROR_SHARING_VIOLATION` / `ERROR_ACCESS_DENIED` for rename and delete
-  - [ ] `LockFile` = `LockFileEx` on an open handle, held until `UnlockFile`
-  - [ ] Map `GetLastError()` to `Status` with a readable message (`FormatMessageW`)
-- [ ] `MemFileSystem`: in-memory implementation for fast tests
-- [ ] **Conformance suite**: one set of typed GoogleTest tests run against both `WinFileSystem` and `MemFileSystem` (append/read back, positional reads, rename replaces, delete while open, lock held twice fails, missing file errors)
+- [x] Interfaces in `src/env/`: `WritableFile` (Append, Flush, Sync, Close), `SequentialFile` (Read, Skip), `RandomAccessFile` (positional Read), `FileLock`
+- [x] `FileSystem` interface: NewWritableFile, NewSequentialFile, NewRandomAccessFile, RenameReplace, DeleteFile (named `RemoveFile`: `<windows.h>` defines `DeleteFile` as a macro), FileExists, GetChildren, GetFileSize, CreateDir, LockFile, UnlockFile
+- [x] `UniqueHandle`: move-only RAII wrapper around a Win32 `HANDLE`
+- [x] `WinFileSystem`:
+  - [x] Paths via `std::filesystem::path` → wide strings (`CreateFileW`)
+  - [x] Share mode `FILE_SHARE_READ | FILE_SHARE_DELETE` so open files can be deleted (readers also allow `FILE_SHARE_WRITE`; the LOCK file deliberately omits `FILE_SHARE_DELETE`; ADR 0002 rule 6)
+  - [x] POSIX delete (`FileDispositionInfoEx`) so a removed file's name is free at once, with fallback to delete-on-close (ADR 0002 rule 7)
+  - [x] Positional reads with `ReadFile` + `OVERLAPPED` offset (no shared file pointer, safe across threads)
+  - [x] Buffered `WritableFile` (e.g., 64 KiB buffer); `Sync` = flush buffer + `FlushFileBuffers`
+  - [x] `RenameReplace` = `MoveFileExW(..., MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`
+  - [x] Bounded retry with backoff on `ERROR_SHARING_VIOLATION` / `ERROR_ACCESS_DENIED` for rename and delete
+  - [x] `LockFile` = `LockFileEx` on an open handle, held until `UnlockFile`
+  - [x] Map `GetLastError()` to `Status` with a readable message (`FormatMessageW`)
+- [x] `MemFileSystem`: in-memory implementation for fast tests
+- [x] **Conformance suite**: one set of typed GoogleTest tests run against both `WinFileSystem` and `MemFileSystem` (append/read back, positional reads, rename replaces, delete while open, lock held twice fails, missing file errors)
 
 ### 0.5 Docs
-- [ ] `docs/adr/0000-template.md` (context, decision, alternatives, consequences)
-- [ ] ADR 0001: Windows-only scope and toolchain
-- [ ] ADR 0002: durability rules on Windows (`FlushFileBuffers`, write-through rename, no directory fsync, MANIFEST lists every live file); link each claim to Microsoft's API documentation
+- [x] `docs/adr/0000-template.md` (context, decision, alternatives, consequences)
+- [x] ADR 0001: Windows-only scope and toolchain
+- [x] ADR 0002: durability rules on Windows (`FlushFileBuffers`, write-through rename, no directory fsync, MANIFEST lists every live file); link each claim to Microsoft's API documentation (status Proposed: open question on whether recovery may trust the CURRENT rename, to decide before Phase 3)
 - [x] `docs/file-formats.md` skeleton (created in 0.3 with the primitive encodings and CRC-32C, per the "document every byte format with its code" rule)
 
 ### ✅ Exit gate — Phase 0
 - [ ] All CI jobs green on `main`
-- [ ] Conformance suite passes on both file systems
+- [x] Conformance suite passes on both file systems (96/96 with MSVC and clang-cl, 97/97 under ASan, on Windows/NTFS)
 - [ ] ADR 0002 written and reviewed by you line by line
 
 ---
@@ -168,7 +168,7 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - [ ] `FaultInjectionFileSystem` wraps any `FileSystem` and tracks, per file, how many bytes are synced
 - [ ] `SimulateCrash()`: truncate every file to its synced length; files never synced may vanish entirely
 - [ ] Options: keep a random part of the unsynced tail; corrupt the final partial write (torn write)
-- [ ] Error injection: fail the Nth `Append`, `Sync`, `RenameReplace` or `DeleteFile` with an I/O error
+- [ ] Error injection: fail the Nth `Append`, `Sync`, `RenameReplace` or `RemoveFile` with an I/O error
 - [ ] Its own unit tests (it must be trustworthy before it judges anything else)
 
 ### 2.5 Crash torture test
@@ -372,3 +372,6 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - [ ] No transactions beyond atomic `WriteBatch`
 - [ ] Power-loss safety is verified with a simulated file system; real behaviour also depends on the drive's write cache
 - [ ] No data-race detector on Windows; concurrency is verified by design, stress tests and assertions
+- [ ] Durability needs a drive that honors flush requests; "Turn off Windows write-cache buffer flushing" voids it (ADR 0002, F4)
+- [ ] File systems without POSIX delete (FAT32, some network shares, Wine) keep a removed file's name until its last handle closes (ADR 0002, rule 7)
+- [ ] Database paths are limited to MAX_PATH unless Windows long paths are enabled

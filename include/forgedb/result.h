@@ -99,14 +99,14 @@ class [[nodiscard]] Result {
 //
 // `lhs` is a declaration such as `auto file`, so it cannot be parenthesized.
 // NOLINTBEGIN(cppcoreguidelines-macro-usage,bugprone-macro-parentheses)
-#define FORGEDB_RESULT_CONCAT_INNER_(a, b) a##b
-#define FORGEDB_RESULT_CONCAT_(a, b) FORGEDB_RESULT_CONCAT_INNER_(a, b)
+#define FORGEDB_DETAIL_CONCAT_INNER(a, b) a##b
+#define FORGEDB_DETAIL_CONCAT(a, b) FORGEDB_DETAIL_CONCAT_INNER(a, b)
 #define FORGEDB_ASSIGN_OR_RETURN(lhs, expr) \
-  FORGEDB_ASSIGN_OR_RETURN_IMPL_(FORGEDB_RESULT_CONCAT_(forgedb_result_, __LINE__), lhs, expr)
-#define FORGEDB_ASSIGN_OR_RETURN_IMPL_(result, lhs, expr) \
-  auto result = (expr);                                   \
-  if (!result.ok()) {                                     \
-    return std::move(result).status();                    \
-  }                                                       \
+  FORGEDB_DETAIL_ASSIGN_OR_RETURN(FORGEDB_DETAIL_CONCAT(forgedb_result_, __LINE__), lhs, expr)
+#define FORGEDB_DETAIL_ASSIGN_OR_RETURN(result, lhs, expr) \
+  auto result = (expr);                                    \
+  if (!result.ok()) {                                      \
+    return std::move(result).status();                     \
+  }                                                        \
   lhs = std::move(result).value()
 // NOLINTEND(cppcoreguidelines-macro-usage,bugprone-macro-parentheses)

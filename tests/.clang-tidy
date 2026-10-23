@@ -1,14 +1,17 @@
 ---
 # Tests inherit the root config, minus checks that GoogleTest's macros trip
 # by design (TEST() defines globals and classes with generated names), and
-# fixed random seeds, which keep randomized tests reproducible.
+# fixed random seeds, which keep randomized tests reproducible. Test fixtures
+# share state with TEST bodies through protected members by design.
 InheritParentConfig: true
 Checks: >
   -cppcoreguidelines-avoid-non-const-global-variables,
   -cppcoreguidelines-owning-memory,
   -cppcoreguidelines-special-member-functions,
   -readability-function-cognitive-complexity,
-  -bugprone-random-generator-seed
+  -bugprone-random-generator-seed,
+  -cppcoreguidelines-non-private-member-variables-in-classes,
+  -misc-non-private-member-variables-in-classes
 CheckOptions:
   - { key: readability-identifier-naming.ClassIgnoredRegexp, value: '.*_Test$' }
 ...

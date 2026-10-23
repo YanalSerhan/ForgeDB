@@ -1,0 +1,8 @@
+---
+# src/env/ is the only code that talks to Win32. Win32 structs such as
+# OVERLAPPED and LARGE_INTEGER expose their fields through unions, so the
+# union-access rule can't be followed here.
+InheritParentConfig: true
+Checks: >
+  -cppcoreguidelines-pro-type-union-access
+...

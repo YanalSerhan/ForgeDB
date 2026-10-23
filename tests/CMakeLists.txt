@@ -7,9 +7,11 @@ add_executable(forgedb_unit_tests
   unit/check_test.cpp
   unit/coding_test.cpp
   unit/crc32c_test.cpp
+  unit/file_system_conformance_test.cpp
   unit/result_test.cpp
   unit/status_test.cpp
   unit/version_test.cpp
+  unit/win_file_system_test.cpp
 )
 target_link_libraries(forgedb_unit_tests PRIVATE forgedb::forgedb GTest::gtest_main)
 # Unit tests exercise internal classes, so they see src/ like the library does.

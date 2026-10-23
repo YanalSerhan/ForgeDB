@@ -33,3 +33,6 @@ LastCoverageResults.log
 
 # Benchmark results (charts and docs are tracked; raw runs are not)
 bench/results/
+
+# User Files
+commands.txt
