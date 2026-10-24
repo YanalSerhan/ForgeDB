@@ -89,6 +89,27 @@ Every stored key is an *internal key*: the user key followed by an 8-byte tag.
 internal key. A lookup at snapshot `S` uses tag `(S << 8) | 0x01`, the largest tag at `S`, so it
 sorts just before every version written at or before `S`.
 
+## Memtable entry
+
+Code: `src/memtable/memtable.h`, `src/memtable/memtable.cpp`. Tests: `tests/unit/memtable_test.cpp`.
+
+In memory only (never written to disk). Each `MemTable::Add` writes one entry into the memtable's
+arena; the skip list stores a pointer to its first byte and orders entries by their internal key.
+
+```
++---------------------+--------------------------+-----------------------+---------------+
+| varint32: n + 8     | internal key (n + 8)     | varint32: value size  | value bytes   |
+|                     | user key | fixed64 tag   |                       |               |
++---------------------+--------------------------+-----------------------+---------------+
+```
+
+- The first two fields are exactly a memtable key (see "Internal key"), so a `LookupKey` can be
+  compared with entries directly.
+- A deletion's value is empty (size `0x00`), and readers ignore it.
+- Example: `Add(5, value, "ab", "xyz")` →
+  `0A 61 62 01 05 00 00 00 00 00 00 03 78 79 7A`.
+- Entries are produced by this process and are trusted; nothing reads them from disk.
+
 ## Write-ahead log
 
 Phase 2.1.

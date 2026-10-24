@@ -15,6 +15,7 @@ add_library(forgedb STATIC
   env/win_file_system.cpp
   env/win_util.cpp
   memtable/arena.cpp
+  memtable/memtable.cpp
   util/check.cpp
   util/coding.cpp
   util/crc32c.cpp

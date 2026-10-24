@@ -5,6 +5,7 @@ find_package(benchmark CONFIG REQUIRED)
 
 add_executable(forgedb_microbench
   crc32c_bench.cpp
+  memtable_bench.cpp
   skip_list_bench.cpp
 )
 target_link_libraries(forgedb_microbench PRIVATE forgedb::forgedb benchmark::benchmark_main)

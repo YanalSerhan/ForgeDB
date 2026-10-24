@@ -85,7 +85,7 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 
 ## Phase 1 — Memtable core (≈2 weeks)
 
-> `[~]` items in 1.3: tests pass on Linux (gcc ASan+UBSan with asserts on, gcc ThreadSanitizer, clang near `-Weverything` with asserts off) and in the Windows build under Wine; waiting for the MSVC/clang-cl run. The microbenchmark still needs its numbers from `msvc-release`.
+> `[~]` items in 1.4: tests pass on Linux (gcc ASan+UBSan+LeakSanitizer with asserts on, gcc ThreadSanitizer, clang near `-Weverything` with asserts off) and in the Windows build under Wine; waiting for the MSVC/clang-cl run. The 1.3 and 1.4 microbenchmarks still need their numbers from `msvc-release`.
 
 ### 1.1 Arena allocator
 - [x] Allocates from 4 KiB blocks; large requests (> 1/4 block) get their own block
@@ -100,20 +100,20 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - [x] Unit tests for ordering, including equal user keys and maximum sequence
 
 ### 1.3 Skip list
-- [~] `template <typename Key, class Comparator> class SkipList`
-- [~] Max height 12, branching factor 4, seeded deterministic random generator
-- [~] `std::atomic<Node*>` next pointers: release on publish, acquire on read
-- [~] Contract: one writer at a time (externally synchronized), any number of lock-free readers, no deletion
-- [~] Iterator: Valid, Seek, SeekToFirst, Next (Prev optional, record the decision): no Prev / SeekToLast, recorded in `skip_list.h`
-- [~] Unit tests: insert/contains, ordered iteration, Seek edge cases
-- [~] Concurrency test: one writer inserting while 4 readers iterate; readers must always see a sorted, consistent prefix
-- [~] Microbenchmark: inserts/sec and lookups/sec at 100k and 1M entries
+- [x] `template <typename Key, class Comparator> class SkipList`
+- [x] Max height 12, branching factor 4, seeded deterministic random generator
+- [x] `std::atomic<Node*>` next pointers: release on publish, acquire on read
+- [x] Contract: one writer at a time (externally synchronized), any number of lock-free readers, no deletion
+- [x] Iterator: Valid, Seek, SeekToFirst, Next (Prev optional, record the decision): no Prev / SeekToLast, recorded in `skip_list.h`
+- [x] Unit tests: insert/contains, ordered iteration, Seek edge cases
+- [x] Concurrency test: one writer inserting while 4 readers iterate; readers must always see a sorted, consistent prefix
+- [~] Microbenchmark: inserts/sec and lookups/sec at 100k and 1M entries (code done; numbers from `msvc-release` pending)
 
 ### 1.4 Memtable
-- [ ] Entry encoding in the arena: varint key length, internal key, varint value length, value
-- [ ] `Add(seq, type, key, value)`, `Get(lookup_key)` → value / deleted / not found
-- [ ] `ApproximateMemoryUsage()` used later as the flush trigger
-- [ ] Reference counting (`Ref` / `Unref`) so readers can keep a memtable alive
+- [~] Entry encoding in the arena: varint key length, internal key, varint value length, value (documented in `docs/file-formats.md`, "Memtable entry")
+- [~] `Add(seq, type, key, value)`, `Get(lookup_key)` → value / deleted / not found
+- [~] `ApproximateMemoryUsage()` used later as the flush trigger
+- [~] Reference counting (`Ref` / `Unref`) so readers can keep a memtable alive, plus the RAII handle `MemTableRef`
 
 ### 1.5 WriteBatch
 - [ ] Encoded representation: 8-byte starting sequence, 4-byte count, then records (type, varint-prefixed key, value)
