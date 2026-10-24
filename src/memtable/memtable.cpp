@@ -136,4 +136,18 @@ MemTable::GetResult MemTable::Get(const LookupKey& key, std::string* value) cons
   ::forgedb::detail::CheckFailed("memtable entry with a known value type");
 }
 
+// --- MemTable::Iterator -----------------------------------------------------------
+
+void MemTable::Iterator::Seek(std::string_view internal_key) {
+  // The skip list compares memtable keys (length-prefixed internal keys).
+  FORGEDB_CHECK(internal_key.size() <= UINT32_MAX);
+  seek_buffer_.clear();
+  PutLengthPrefixed(seek_buffer_, internal_key);
+  it_.Seek(seek_buffer_.data());
+}
+
+std::string_view MemTable::Iterator::key() const noexcept { return DecodeInternalKey(it_.key()); }
+
+std::string_view MemTable::Iterator::value() const noexcept { return DecodeEntry(it_.key()).value; }
+
 }  // namespace forgedb

@@ -9,6 +9,8 @@ configure_file(
   @ONLY)
 
 add_library(forgedb STATIC
+  db/db_impl.cpp
+  db/db_iter.cpp
   db/internal_key.cpp
   db/version.cpp
   db/write_batch.cpp

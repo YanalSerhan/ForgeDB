@@ -7,3 +7,4 @@ One file per non-obvious decision, written when the decision is made. Copy
 |-----|-------|--------|
 | [0001](0001-windows-only-scope-and-toolchain.md) | Windows-only scope and toolchain | Accepted |
 | [0002](0002-durability-on-windows.md) | Durability rules on Windows | Proposed (open question on CURRENT) |
+| [0003](0003-db-iterator-reseek.md) | The DB iterator re-seeks past long runs of hidden entries | Accepted |

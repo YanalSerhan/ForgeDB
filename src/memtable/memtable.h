@@ -75,6 +75,10 @@ class MemTable {
     return refs_.load(std::memory_order_relaxed);
   }
 
+  // Walks every entry, every version of every key, in internal-key order
+  // (user key ascending, newest version first). Defined below.
+  class Iterator;
+
  private:
   // Orders skip-list entries (pointers to encoded entries) by internal key.
   struct KeyComparator {
@@ -134,6 +138,31 @@ class MemTableRef {
 
  private:
   MemTable* table_ = nullptr;
+};
+
+// A forward cursor over a memtable's entries. Like the skip list's iterator
+// it may run concurrently with Add(), and sees every entry added before it
+// was positioned. It holds no reference: the caller keeps the memtable alive
+// (the DB iterator holds a MemTableRef). Views returned by key() and value()
+// stay valid as long as the memtable does.
+class MemTable::Iterator {
+ public:
+  explicit Iterator(const MemTable* table) noexcept : it_(&table->table_) {}
+
+  [[nodiscard]] bool Valid() const noexcept { return it_.Valid(); }
+  void SeekToFirst() noexcept { it_.SeekToFirst(); }
+  // Positions at the first entry whose internal key is >= `internal_key`.
+  void Seek(std::string_view internal_key);
+  // Precondition: Valid().
+  void Next() noexcept { it_.Next(); }
+
+  // The current entry's internal key and value. Precondition: Valid().
+  [[nodiscard]] std::string_view key() const noexcept;
+  [[nodiscard]] std::string_view value() const noexcept;
+
+ private:
+  Table::Iterator it_;
+  std::string seek_buffer_;  // Seek's target, in memtable-key form
 };
 
 }  // namespace forgedb

@@ -8,6 +8,7 @@ add_executable(forgedb_unit_tests
   unit/check_test.cpp
   unit/coding_test.cpp
   unit/crc32c_test.cpp
+  unit/db_test.cpp
   unit/file_system_conformance_test.cpp
   unit/internal_key_test.cpp
   unit/memtable_test.cpp
@@ -26,6 +27,29 @@ forgedb_target_defaults(forgedb_unit_tests)
 # PRE_TEST: list the tests when ctest runs, not at build time, so a build
 # never depends on being able to start the test executable.
 gtest_discover_tests(forgedb_unit_tests DISCOVERY_MODE PRE_TEST)
+
+# Model tests (TODO 1.7): a seeded random workload checked against std::map.
+# The harness (model/model_harness.*) is shared by the model tests of every
+# phase. Optimized builds run the Phase 1 exit gate, 1,000,000 operations per
+# seed; debug and sanitizer builds run 100,000, since they are 20-50x slower.
+# FORGEDB_MODEL_OPS and FORGEDB_MODEL_SEED override at run time.
+add_executable(forgedb_model_tests
+  model/memory_db_model_test.cpp
+  model/model_harness.cpp
+  model/model_harness_test.cpp
+)
+target_link_libraries(forgedb_model_tests PRIVATE forgedb::forgedb GTest::gtest_main)
+target_include_directories(forgedb_model_tests PRIVATE
+  "${PROJECT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}")
+if(CMAKE_BUILD_TYPE STREQUAL "Release" AND NOT FORGEDB_ASAN)
+  set(forgedb_model_operations 1000000)
+else()
+  set(forgedb_model_operations 100000)
+endif()
+target_compile_definitions(forgedb_model_tests PRIVATE
+  FORGEDB_MODEL_TEST_OPERATIONS=${forgedb_model_operations})
+forgedb_target_defaults(forgedb_model_tests)
+gtest_discover_tests(forgedb_model_tests DISCOVERY_MODE PRE_TEST)
 
 # ASan canary (sanitizer builds only): a program that overflows a heap buffer
 # on purpose. The test passes only if ASan's report appears, which proves the

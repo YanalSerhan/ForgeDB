@@ -221,6 +221,61 @@ TEST(MemTableTest, AgreesWithModelAtEverySnapshot) {
   }
 }
 
+// --- Iterator ---------------------------------------------------------------------
+
+std::vector<std::string> AllEntries(const MemTable& table) {
+  std::vector<std::string> entries;
+  MemTable::Iterator it(&table);
+  for (it.SeekToFirst(); it.Valid(); it.Next()) {
+    const std::optional<ParsedInternalKey> key = ParseInternalKey(it.key());
+    if (!key) {
+      ADD_FAILURE() << "unparsable internal key";
+      continue;
+    }
+    entries.push_back(
+        std::string(key->user_key) + "@" + std::to_string(key->sequence) +
+        (key->type == ValueType::kDeletion ? " del" : " =" + std::string(it.value())));
+  }
+  return entries;
+}
+
+TEST(MemTableIteratorTest, VisitsEveryVersionInInternalKeyOrder) {
+  const MemTableRef table = MemTable::Create();
+  table->Add(1, ValueType::kValue, "b", "b1");
+  table->Add(2, ValueType::kValue, "a", "a2");
+  table->Add(3, ValueType::kDeletion, "b", "");
+  table->Add(4, ValueType::kValue, "a", "a4");
+  EXPECT_EQ(AllEntries(*table),
+            std::vector<std::string>({"a@4 =a4", "a@2 =a2", "b@3 del", "b@1 =b1"}));
+}
+
+TEST(MemTableIteratorTest, SeekTakesAnInternalKey) {
+  const MemTableRef table = MemTable::Create();
+  table->Add(1, ValueType::kValue, "a", "a1");
+  table->Add(5, ValueType::kValue, "a", "a5");
+  table->Add(2, ValueType::kValue, "c", "c2");
+
+  MemTable::Iterator it(&*table);
+  std::string target;
+  AppendInternalKey(target, {.user_key = "a", .sequence = 3, .type = kValueTypeForSeek});
+  it.Seek(target);  // a@5 is newer than 3, so the first entry >= (a, 3) is a@1
+  ASSERT_TRUE(it.Valid());
+  EXPECT_EQ(ExtractUserKey(it.key()), "a");
+  EXPECT_EQ(it.value(), "a1");
+
+  target.clear();
+  AppendInternalKey(target,
+                    {.user_key = "b", .sequence = kMaxSequenceNumber, .type = kValueTypeForSeek});
+  it.Seek(target);
+  ASSERT_TRUE(it.Valid());
+  EXPECT_EQ(ExtractUserKey(it.key()), "c");
+
+  target.clear();
+  AppendInternalKey(target, {.user_key = "d", .sequence = 0, .type = ValueType::kDeletion});
+  it.Seek(target);
+  EXPECT_FALSE(it.Valid());
+}
+
 // --- Reference counting -------------------------------------------------------
 
 TEST(MemTableRefTest, CreateHoldsOneReference) {
