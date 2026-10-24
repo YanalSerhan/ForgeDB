@@ -130,9 +130,35 @@ function(forgedb_apply_sanitizers target)
   if(_type STREQUAL "EXECUTABLE")
     target_link_options(${target} PRIVATE ${FORGEDB_ASAN_LINK_OPTIONS})
     if(FORGEDB_ASAN_RUNTIME_DLL)
-      add_custom_command(TARGET ${target} POST_BUILD
-        COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${FORGEDB_ASAN_RUNTIME_DLL}" "$<TARGET_FILE_DIR:${target}>"
-        VERBATIM)
+      _forgedb_copy_asan_runtime_for(${target})
     endif()
   endif()
+endfunction()
+
+# Copies the ASan runtime DLL into `target`'s output directory before the
+# target links, through one copy step per directory that every executable in
+# that directory depends on. (A POST_BUILD copy per executable races: when
+# Ninja links two executables of one directory at the same time, both copies
+# open the same DLL and one fails with "permission denied".)
+# The presets use Ninja (single-config), so the output directory is known at
+# configure time.
+function(_forgedb_copy_asan_runtime_for target)
+  get_target_property(_out_dir ${target} RUNTIME_OUTPUT_DIRECTORY)
+  if(NOT _out_dir)
+    get_target_property(_out_dir ${target} BINARY_DIR)
+  endif()
+  string(MD5 _dir_hash "${_out_dir}")
+  string(SUBSTRING "${_dir_hash}" 0 12 _dir_hash)
+  set(_copy_target "forgedb_asan_runtime_${_dir_hash}")
+  if(NOT TARGET ${_copy_target})
+    get_filename_component(_dll_name "${FORGEDB_ASAN_RUNTIME_DLL}" NAME)
+    add_custom_command(
+      OUTPUT "${_out_dir}/${_dll_name}"
+      COMMAND "${CMAKE_COMMAND}" -E copy "${FORGEDB_ASAN_RUNTIME_DLL}" "${_out_dir}/${_dll_name}"
+      DEPENDS "${FORGEDB_ASAN_RUNTIME_DLL}"
+      COMMENT "Copying the ASan runtime DLL to ${_out_dir}"
+      VERBATIM)
+    add_custom_target(${_copy_target} DEPENDS "${_out_dir}/${_dll_name}")
+  endif()
+  add_dependencies(${target} ${_copy_target})
 endfunction()
