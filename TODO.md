@@ -85,7 +85,7 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 
 ## Phase 1 — Memtable core (≈2 weeks)
 
-> `[~]` items in 1.6-1.7 and the exit gate: tests pass on Linux (gcc ASan+UBSan+LeakSanitizer with asserts on and off, gcc ThreadSanitizer for the concurrency tests, clang near `-Weverything`) and in the Windows build under Wine; waiting for the MSVC/clang-cl run and a coverage measurement.
+> Exit gate: everything is green in CI (run 40104020951, all 10 jobs). Open: the coverage figure from that run's `coverage (msvc-debug)` job, then `COVERAGE_MIN_LINE_PERCENT` → 85 in `ci.yml`.
 >
 > Microbenchmark numbers below: `msvc-release`, Intel Core i7-10750H laptop, one run each (Google Benchmark; the 1M insert cases ran a single iteration, so treat them as rough). Raw output is not committed (`bench/results/` is ignored).
 
@@ -126,33 +126,35 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - [x] Unit tests including malformed input
 
 ### 1.6 DB skeleton (memory only)
-- [~] Public headers: `db.h`, `options.h`, `status.h`, `write_batch.h`, `iterator.h` (option structs stay empty until a phase can honour a setting)
-- [~] `DBImpl` with one memtable: Put, Delete, Write, Get, NewIterator; one mutex for writers, lock-free reads at a captured sequence number; key/value size limits → `InvalidArgument`
-- [~] DB iterator over the memtable that hides older versions and deletions; reads a snapshot; re-seeks after 8 skipped entries (ADR 0003)
+- [x] Public headers: `db.h`, `options.h`, `status.h`, `write_batch.h`, `iterator.h` (option structs stay empty until a phase can honour a setting)
+- [x] `DBImpl` with one memtable: Put, Delete, Write, Get, NewIterator; one mutex for writers, lock-free reads at a captured sequence number; key/value size limits → `InvalidArgument`
+- [x] DB iterator over the memtable that hides older versions and deletions; reads a snapshot; re-seeks after 8 skipped entries (ADR 0003)
 
 ### 1.7 Model test harness
-- [~] Seeded random operation generator: Put, Delete, WriteBatch, Get, full scan, Seek + N×Next (`tests/model/model_harness.*`)
-- [~] Reference model: `std::map<std::string, std::string>`
-- [~] Compare every read; on mismatch, print the seed and a minimal reproduction (reads dropped, then ddmin over writes, then inside batches; self-tested with a deliberately buggy DB)
-- [~] Keys from a small key space too (forces overwrites and deletes of existing keys)
-- [~] The harness is reused by every later phase (only the DB setup changes: a `DbFactory`)
+- [x] Seeded random operation generator: Put, Delete, WriteBatch, Get, full scan, Seek + N×Next (`tests/model/model_harness.*`)
+- [x] Reference model: `std::map<std::string, std::string>`
+- [x] Compare every read; on mismatch, print the seed and a minimal reproduction (reads dropped, then ddmin over writes, then inside batches; self-tested with a deliberately buggy DB)
+- [x] Keys from a small key space too (forces overwrites and deletes of existing keys)
+- [x] The harness is reused by every later phase (only the DB setup changes: a `DbFactory`)
 
 ### ✅ Exit gate — Phase 1
-- [~] Model test: 1,000,000 random operations agree with `std::map` (several seeds, in CI): 3 seeds × 1,000,000 in `msvc-release`, 100,000 in debug/ASan presets
+- [x] Model test: 1,000,000 random operations agree with `std::map` (several seeds, in CI): 3 seeds × 1,000,000 in `msvc-release`, 100,000 in debug/ASan presets (CI run 40104020951)
 - [x] Concurrency test passes 1,000 iterations (skip list and memtable, `msvc-release`, 1000/1000)
-- [ ] ASan clean; coverage ≥ 85% on `src/`
+- [~] ASan clean; coverage ≥ 85% on `src/`: ASan clean (`msvc-asan`, `clangcl-asan`, CI run 40104020951); coverage figure not read yet, CI threshold still 0
 
 ---
 
 ## Phase 2 — Write-ahead log and recovery (≈2 weeks)
 
+> `[~]` items in 2.1: tests pass on Linux (gcc ASan+UBSan, asserts on and off; clang near `-Weverything`) and in the Windows build under Wine; waiting for the MSVC/clang-cl run.
+
 ### 2.1 Log format
-- [ ] 32 KiB blocks; record header = CRC32C (4) + length (2) + type (1); types FULL, FIRST, MIDDLE, LAST for records spanning blocks
-- [ ] Block tail too small for a header is zero-padded
-- [ ] Document the byte layout in `docs/file-formats.md`
-- [ ] `log::Writer` (appends records) and `log::Reader` (reassembles records, reports corruption with offset and reason)
-- [ ] Reader distinguishes a **torn tail** (incomplete last record → ignore) from **mid-log corruption** (→ error)
-- [ ] Unit tests: records of every size class, block boundaries, empty records, truncated tail, flipped bits
+- [~] 32 KiB blocks; record header = CRC32C (4) + length (2) + type (1); types FULL, FIRST, MIDDLE, LAST for records spanning blocks
+- [~] Block tail too small for a header is zero-padded
+- [~] Document the byte layout in `docs/file-formats.md`
+- [~] `log::Writer` (appends records) and `log::Reader` (reassembles records, reports corruption with offset and reason)
+- [~] Reader distinguishes a **torn tail** (incomplete last record → ignore) from **mid-log corruption** (→ error): torn tail iff no valid fragment follows the damage; mid-log corruption fails recovery (strict policy, chosen in 2.1)
+- [~] Unit tests: records of every size class, block boundaries, empty records, truncated tail, flipped bits
 
 ### 2.2 Write path with group commit
 - [ ] Writer queue: `std::mutex` + `std::condition_variable`; the first waiting writer becomes leader

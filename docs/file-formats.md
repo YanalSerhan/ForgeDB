@@ -145,7 +145,49 @@ Any violation is a `Corruption` status saying what was wrong and at which byte o
 
 ## Write-ahead log
 
-Phase 2.1.
+Code: `src/log/log_format.h`, `src/log/log_writer.*`, `src/log/log_reader.*`. Tests:
+`tests/unit/log_test.cpp`.
+
+Every write batch is appended to the current log file (`NNNNNN.log`, Phase 2.3) as one *record*
+before it is applied to the memtable; recovery replays the records in order. The record's payload
+is the batch's bytes (see "Write batch").
+
+**Blocks.** The file is a sequence of 32 KiB (32768-byte) blocks; the last one may be partial. A
+record is stored as one or more *fragments*, and a fragment never crosses a block boundary:
+
+```
++------------------------+-------------------+--------------+---------------------+
+| CRC: fixed32 (masked)  | length: fixed16   | type: 1 byte | payload: length B   |
++------------------------+-------------------+--------------+---------------------+
+ <------------------------- 7-byte header --------------------------------------->
+```
+
+- `length` is the payload size in this fragment, little-endian, at most 32761 (32768 - 7).
+- `type`: `1` FULL (a whole record), `2` FIRST, `3` MIDDLE, `4` LAST (parts of a record that
+  spans blocks, in that order). `0` is never written; it marks zero-filled space.
+- `CRC` is the masked CRC-32C (see "Checksums") of the type byte followed by the payload.
+- A record that fits in the rest of the current block is one FULL fragment, otherwise FIRST,
+  MIDDLE ..., LAST, each filling its block. An empty record is a FULL fragment with length 0.
+- When fewer than 7 bytes are left in a block, they are zero-filled and the next fragment starts
+  at the next block. When exactly 7 are left, a non-empty record starts there with an empty FIRST fragment.
+- Example: the first record of a log, the 3 bytes `abc`, is
+  `<crc> 03 00 01 61 62 63`, where `<crc>` = `Mask(CRC-32C(01 61 62 63))`, stored little-endian.
+
+**Reading.** Every fragment is checked before use: a complete header, a length within its
+block, a known type, a matching CRC, and fragments in a legal order (FIRST, MIDDLE..., LAST; no
+MIDDLE or LAST without a FIRST, no new record before the last one ended). The first failed check
+is a *problem*, classified by one rule:
+
+- **Torn tail** (ignored; the log ends there): no valid fragment exists anywhere after the
+  problem. This is what a crash leaves: a header or payload cut off by the end of the file, a
+  record whose last fragment is missing, garbage, or zeros. The incomplete record is dropped.
+- **Mid-log corruption** (recovery fails with `Corruption`, the offset and the reason): a valid
+  fragment exists after the problem, so the damage did not come from a crash at the end.
+
+The search for a later valid fragment checks every byte offset in the rest of the problem's
+block and in the next block, then only the start of each later block (where the writer always
+starts a fragment).
+
 
 ## Table file (.sst): blocks, filter, index, footer
 

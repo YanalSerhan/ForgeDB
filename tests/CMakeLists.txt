@@ -11,6 +11,7 @@ add_executable(forgedb_unit_tests
   unit/db_test.cpp
   unit/file_system_conformance_test.cpp
   unit/internal_key_test.cpp
+  unit/log_test.cpp
   unit/memtable_test.cpp
   unit/result_test.cpp
   unit/skip_list_test.cpp

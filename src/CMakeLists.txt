@@ -17,6 +17,8 @@ add_library(forgedb STATIC
   env/mem_file_system.cpp
   env/win_file_system.cpp
   env/win_util.cpp
+  log/log_reader.cpp
+  log/log_writer.cpp
   memtable/arena.cpp
   memtable/memtable.cpp
   util/check.cpp
