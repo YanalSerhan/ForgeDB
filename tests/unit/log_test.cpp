@@ -39,7 +39,7 @@ class LogTest : public testing::Test {
  protected:
   // The bytes of a new log holding `records`.
   std::string WriteLog(const std::vector<std::string>& records) {
-    std::unique_ptr<WritableFile> file = std::move(fs_.NewWritableFile("log")).value();
+    const std::unique_ptr<WritableFile> file = std::move(fs_.NewWritableFile("log")).value();
     Writer writer(file.get());
     for (const std::string& record : records) {
       EXPECT_TRUE(writer.AddRecord(record).ok());
@@ -51,7 +51,7 @@ class LogTest : public testing::Test {
   // Reads every record from a log consisting of `bytes`.
   ReadResult ReadLog(std::string_view bytes) {
     {
-      std::unique_ptr<WritableFile> file = std::move(fs_.NewWritableFile("input")).value();
+      const std::unique_ptr<WritableFile> file = std::move(fs_.NewWritableFile("input")).value();
       EXPECT_TRUE(file->Append(bytes).ok());
       EXPECT_TRUE(file->Close().ok());
     }
@@ -77,7 +77,7 @@ class LogTest : public testing::Test {
   }
 
   std::string FileContents(const std::string& name) {
-    std::unique_ptr<SequentialFile> file = std::move(fs_.NewSequentialFile(name)).value();
+    const std::unique_ptr<SequentialFile> file = std::move(fs_.NewSequentialFile(name)).value();
     std::string contents;
     std::string buffer(kBlockSize, '\0');
     while (true) {
@@ -235,7 +235,7 @@ TEST_F(LogTest, EveryTruncationIsATornTail) {
   const std::vector<std::string> records = {
       std::string(10, 'a'), std::string(kBlockSize - kHeaderSize, 'b'),  // fills a block exactly
       std::string(5, 'c'),  RandomBytes(40000, 1),                       // spans blocks
-      std::string(3, 'd'),  std::string(0, 'e'),
+      std::string(3, 'd'),  std::string(),                               // empty
       std::string(1, 'f')};
   // The end offset of each record: the size of a log holding it and those before.
   std::vector<std::size_t> ends;
