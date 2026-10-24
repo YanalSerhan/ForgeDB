@@ -59,8 +59,8 @@ CheckOptions:
   - { key: readability-identifier-naming.FunctionIgnoredRegexp,  value: '^(main|wmain|LLVMFuzzerTestOneInput|LLVMFuzzerInitialize)$' }
   - { key: readability-identifier-naming.MethodCase,             value: CamelCase }
   # Lower-case accessors, matching the standard library and std::expected:
-  # Status::ok()/code()/message(), Result::ok()/value()/status().
-  - { key: readability-identifier-naming.MethodIgnoredRegexp,    value: '^(begin|end|size|data|empty|swap|ok|code|message|value|status)$' }
+  # Status::ok()/code()/message(), Result::ok()/value()/status(), Iterator::key().
+  - { key: readability-identifier-naming.MethodIgnoredRegexp,    value: '^(begin|end|size|data|empty|swap|ok|code|message|key|value|status)$' }
   - { key: readability-identifier-naming.VariableCase,           value: lower_case }
   - { key: readability-identifier-naming.ParameterCase,          value: lower_case }
   - { key: readability-identifier-naming.PublicMemberCase,       value: lower_case }

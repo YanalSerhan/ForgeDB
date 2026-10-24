@@ -85,29 +85,29 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 
 ## Phase 1 — Memtable core (≈2 weeks)
 
-> `[~]` items in 1.1-1.2: tests pass on Linux (gcc and clang, ASan+UBSan, asserts on and off) and in the Windows build under Wine; waiting for the MSVC/clang-cl run.
+> `[~]` items in 1.3: tests pass on Linux (gcc ASan+UBSan with asserts on, gcc ThreadSanitizer, clang near `-Weverything` with asserts off) and in the Windows build under Wine; waiting for the MSVC/clang-cl run. The microbenchmark still needs its numbers from `msvc-release`.
 
 ### 1.1 Arena allocator
-- [~] Allocates from 4 KiB blocks; large requests (> 1/4 block) get their own block
-- [~] Aligned allocation for node structs
-- [~] `MemoryUsage()` tracked atomically (read by other threads)
-- [~] Unit tests: alignment, large allocations, usage accounting; ASan clean
+- [x] Allocates from 4 KiB blocks; large requests (> 1/4 block) get their own block
+- [x] Aligned allocation for node structs
+- [x] `MemoryUsage()` tracked atomically (read by other threads)
+- [x] Unit tests: alignment, large allocations, usage accounting; ASan clean
 
 ### 1.2 Internal key format
-- [~] Internal key = user key + 8-byte tag (`sequence << 8 | type`), type ∈ {value, deletion}
-- [~] Comparator: user key ascending, then sequence **descending** (newest first)
-- [~] `LookupKey` helper for Get at a given sequence
-- [~] Unit tests for ordering, including equal user keys and maximum sequence
+- [x] Internal key = user key + 8-byte tag (`sequence << 8 | type`), type ∈ {value, deletion}
+- [x] Comparator: user key ascending, then sequence **descending** (newest first)
+- [x] `LookupKey` helper for Get at a given sequence
+- [x] Unit tests for ordering, including equal user keys and maximum sequence
 
 ### 1.3 Skip list
-- [ ] `template <typename Key, class Comparator> class SkipList`
-- [ ] Max height 12, branching factor 4, seeded deterministic random generator
-- [ ] `std::atomic<Node*>` next pointers: release on publish, acquire on read
-- [ ] Contract: one writer at a time (externally synchronized), any number of lock-free readers, no deletion
-- [ ] Iterator: Valid, Seek, SeekToFirst, Next (Prev optional, record the decision)
-- [ ] Unit tests: insert/contains, ordered iteration, Seek edge cases
-- [ ] Concurrency test: one writer inserting while 4 readers iterate; readers must always see a sorted, consistent prefix
-- [ ] Microbenchmark: inserts/sec and lookups/sec at 100k and 1M entries
+- [~] `template <typename Key, class Comparator> class SkipList`
+- [~] Max height 12, branching factor 4, seeded deterministic random generator
+- [~] `std::atomic<Node*>` next pointers: release on publish, acquire on read
+- [~] Contract: one writer at a time (externally synchronized), any number of lock-free readers, no deletion
+- [~] Iterator: Valid, Seek, SeekToFirst, Next (Prev optional, record the decision): no Prev / SeekToLast, recorded in `skip_list.h`
+- [~] Unit tests: insert/contains, ordered iteration, Seek edge cases
+- [~] Concurrency test: one writer inserting while 4 readers iterate; readers must always see a sorted, consistent prefix
+- [~] Microbenchmark: inserts/sec and lookups/sec at 100k and 1M entries
 
 ### 1.4 Memtable
 - [ ] Entry encoding in the arena: varint key length, internal key, varint value length, value
