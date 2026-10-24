@@ -85,7 +85,9 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 
 ## Phase 1 — Memtable core (≈2 weeks)
 
-> `[~]` items in 1.4: tests pass on Linux (gcc ASan+UBSan+LeakSanitizer with asserts on, gcc ThreadSanitizer, clang near `-Weverything` with asserts off) and in the Windows build under Wine; waiting for the MSVC/clang-cl run. The 1.3 and 1.4 microbenchmarks still need their numbers from `msvc-release`.
+> `[~]` items in 1.5: tests pass on Linux (gcc ASan+UBSan with asserts on and off) and in the Windows build under Wine; waiting for the MSVC/clang-cl run.
+>
+> Microbenchmark numbers below: `msvc-release`, Intel Core i7-10750H laptop, one run each (Google Benchmark; the 1M insert cases ran a single iteration, so treat them as rough). Raw output is not committed (`bench/results/` is ignored).
 
 ### 1.1 Arena allocator
 - [x] Allocates from 4 KiB blocks; large requests (> 1/4 block) get their own block
@@ -107,19 +109,21 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - [x] Iterator: Valid, Seek, SeekToFirst, Next (Prev optional, record the decision): no Prev / SeekToLast, recorded in `skip_list.h`
 - [x] Unit tests: insert/contains, ordered iteration, Seek edge cases
 - [x] Concurrency test: one writer inserting while 4 readers iterate; readers must always see a sorted, consistent prefix
-- [~] Microbenchmark: inserts/sec and lookups/sec at 100k and 1M entries (code done; numbers from `msvc-release` pending)
+- [x] Microbenchmark: inserts/sec and lookups/sec at 100k and 1M entries (64-bit integer keys)
+  - Insert: 4.07 M/s at 100k, 1.19 M/s at 1M · Lookup (hits, random order): 3.59 M/s at 100k, 428 k/s at 1M
 
 ### 1.4 Memtable
-- [~] Entry encoding in the arena: varint key length, internal key, varint value length, value (documented in `docs/file-formats.md`, "Memtable entry")
-- [~] `Add(seq, type, key, value)`, `Get(lookup_key)` → value / deleted / not found
-- [~] `ApproximateMemoryUsage()` used later as the flush trigger
-- [~] Reference counting (`Ref` / `Unref`) so readers can keep a memtable alive, plus the RAII handle `MemTableRef`
+- [x] Entry encoding in the arena: varint key length, internal key, varint value length, value (documented in `docs/file-formats.md`, "Memtable entry")
+- [x] `Add(seq, type, key, value)`, `Get(lookup_key)` → value / deleted / not found
+- [x] `ApproximateMemoryUsage()` used later as the flush trigger
+- [x] Reference counting (`Ref` / `Unref`) so readers can keep a memtable alive, plus the RAII handle `MemTableRef`
+- [x] Microbenchmark (16-byte keys, 100-byte values): Add 595 k/s at 100k, 302 k/s at 1M · Get (hits, random order): 418 k/s at 100k, 279 k/s at 1M
 
 ### 1.5 WriteBatch
-- [ ] Encoded representation: 8-byte starting sequence, 4-byte count, then records (type, varint-prefixed key, value)
-- [ ] `Put`, `Delete`, `Clear`, `Count`, `ApproximateSize`, `Iterate(Handler&)`
-- [ ] Decoder rejects malformed batches with a corruption status
-- [ ] Unit tests including malformed input
+- [~] Encoded representation: 8-byte starting sequence, 4-byte count, then records (type, varint-prefixed key, value) (documented in `docs/file-formats.md`, "Write batch")
+- [~] `Put`, `Delete`, `Clear`, `Count`, `ApproximateSize`, `Iterate(Handler&)`; engine-only parts (sequence, raw contents, `InsertInto(memtable)`) in `src/db/write_batch_internal.h`
+- [~] Decoder rejects malformed batches with a corruption status, before applying any record (a batch is applied whole or not at all)
+- [~] Unit tests including malformed input
 
 ### 1.6 DB skeleton (memory only)
 - [ ] Public headers: `db.h`, `options.h`, `status.h`, `write_batch.h`, `iterator.h`
@@ -135,7 +139,7 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 
 ### ✅ Exit gate — Phase 1
 - [ ] Model test: 1,000,000 random operations agree with `std::map` (several seeds, in CI)
-- [ ] Concurrency test passes 1,000 iterations
+- [x] Concurrency test passes 1,000 iterations (skip list and memtable, `msvc-release`, 1000/1000)
 - [ ] ASan clean; coverage ≥ 85% on `src/`
 
 ---

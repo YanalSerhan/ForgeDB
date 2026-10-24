@@ -11,6 +11,7 @@ configure_file(
 add_library(forgedb STATIC
   db/internal_key.cpp
   db/version.cpp
+  db/write_batch.cpp
   env/mem_file_system.cpp
   env/win_file_system.cpp
   env/win_util.cpp

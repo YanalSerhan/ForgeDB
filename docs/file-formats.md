@@ -110,6 +110,39 @@ arena; the skip list stores a pointer to its first byte and orders entries by th
   `0A 61 62 01 05 00 00 00 00 00 00 03 78 79 7A`.
 - Entries are produced by this process and are trusted; nothing reads them from disk.
 
+## Write batch
+
+Code: `include/forgedb/write_batch.h`, `src/db/write_batch_internal.h`, `src/db/write_batch.cpp`.
+Tests: `tests/unit/write_batch_test.cpp`.
+
+A `WriteBatch` is stored as these bytes, and the write-ahead log (Phase 2) stores them unchanged as
+the payload of one log record.
+
+```
++--------------------+-----------------+---------------------------------+
+| sequence: fixed64  | count: fixed32  | count records, back to back     |
++--------------------+-----------------+---------------------------------+
+
+Put record:     0x01 | varint32 key size | key | varint32 value size | value
+Delete record:  0x00 | varint32 key size | key
+```
+
+- `sequence` is the sequence number of the first record; record `i` (from 0) gets
+  `sequence + i`. It is 0 until the DB assigns it at write time.
+- The record type bytes are the internal key types (`0x01` value, `0x00` deletion).
+- Example: sequence 100, `Put("ab", "xyz")`, `Delete("c")` →
+  `64 00 00 00 00 00 00 00 | 02 00 00 00 | 01 02 61 62 03 78 79 7A | 00 01 63` (23 bytes).
+
+Validation (the bytes may come from a damaged log, so all of it is checked before any record is
+applied, and a malformed batch is applied not at all):
+
+- At least 12 bytes (the header).
+- Every record has a known type byte and complete, in-bounds varint32 lengths and payloads.
+- The records end exactly at the end of the bytes, and their number equals `count`.
+- When applied: `sequence + count - 1` must not exceed `2^56 - 1` (the largest sequence number).
+
+Any violation is a `Corruption` status saying what was wrong and at which byte offset.
+
 ## Write-ahead log
 
 Phase 2.1.

@@ -16,6 +16,7 @@ add_executable(forgedb_unit_tests
   unit/status_test.cpp
   unit/version_test.cpp
   unit/win_file_system_test.cpp
+  unit/write_batch_test.cpp
 )
 target_link_libraries(forgedb_unit_tests PRIVATE forgedb::forgedb GTest::gtest_main)
 # Unit tests exercise internal classes, so they see src/ like the library does.
