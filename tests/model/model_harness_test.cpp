@@ -18,10 +18,16 @@
 #include "forgedb/db.h"
 #include "forgedb/write_batch.h"
 
+#include "db/db_impl.h"
+#include "env/mem_file_system.h"
+
 namespace forgedb::model {
 namespace {
 
-Result<std::unique_ptr<DB>> OpenMemoryDB() { return DB::Open(Options{}, "model-test"); }
+// A new database on its own in-memory file system.
+Result<std::unique_ptr<DB>> OpenMemoryDB() {
+  return OpenDB(Options{}, "model-test", std::make_shared<MemFileSystem>());
+}
 
 RunOptions SeedAndOps(std::uint64_t seed, std::size_t operations) {
   RunOptions options;

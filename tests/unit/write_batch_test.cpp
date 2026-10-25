@@ -132,6 +132,24 @@ TEST(WriteBatchTest, CopiesAreIndependent) {
   EXPECT_EQ(Contents(copy), "Put(a, 1) Delete(b) ");
 }
 
+TEST(WriteBatchTest, AppendJoinsBatchesAndKeepsTheDestinationSequence) {
+  WriteBatch first;
+  WriteBatchInternal::SetSequence(first, 7);
+  first.Put("a", "1");
+  WriteBatch second;
+  WriteBatchInternal::SetSequence(second, 99);  // ignored by Append
+  second.Delete("b");
+  second.Put("c", "3");
+  WriteBatchInternal::Append(first, second);
+  EXPECT_EQ(first.Count(), 3U);
+  EXPECT_EQ(WriteBatchInternal::Sequence(first), 7U);
+  EXPECT_EQ(Contents(first), "Put(a, 1) Delete(b) Put(c, 3) ");
+
+  WriteBatchInternal::Append(first, WriteBatch{});  // appending an empty batch
+  EXPECT_EQ(first.Count(), 3U);
+  EXPECT_EQ(Contents(first), "Put(a, 1) Delete(b) Put(c, 3) ");
+}
+
 TEST(WriteBatchTest, SequenceAndContentsRoundTrip) {
   WriteBatch batch;
   WriteBatchInternal::SetSequence(batch, kMaxSequenceNumber);

@@ -46,6 +46,10 @@ class WriteBatchInternal {
   // Iterate() and InsertInto(), which reject malformed records.
   [[nodiscard]] static Status SetContents(WriteBatch& batch, std::string_view contents);
 
+  // Appends `src`'s operations to `dst` (dst's sequence number is kept).
+  // Precondition: the combined count fits in 32 bits.
+  static void Append(WriteBatch& dst, const WriteBatch& src);
+
   // Applies every operation to `memtable` with sequence numbers Sequence(),
   // Sequence() + 1, ... The caller must be the memtable's only writer.
   // Returns Corruption, having changed nothing, if the batch is malformed or

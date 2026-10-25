@@ -11,9 +11,10 @@
 // Thread safety: every DB method may be called from any number of threads at
 // once. Iterators are not shared: each is used by one thread at a time.
 //
-// Phase 1: the database lives in memory only. `name` is accepted so the API
-// does not change, but nothing is written to disk until the write-ahead log
-// (Phase 2); everything is lost when the DB is destroyed.
+// Phase 2.2: every write is appended to a write-ahead log in the directory
+// `name` (created if missing) before it is applied. The log is not read back
+// yet (recovery is Phase 2.3), so opening a directory that already holds a
+// log fails with NotSupported instead of overwriting it.
 #pragma once
 
 #include <cstddef>
@@ -38,8 +39,8 @@ inline constexpr std::size_t kMaxValueSize = std::size_t{256} * 1024 * 1024;  //
 
 class DB {
  public:
-  // Opens the database called `name` (a directory path, from Phase 2 on).
-  // InvalidArgument if `name` is empty.
+  // Opens the database in directory `name`. InvalidArgument if `name` is
+  // empty; the file system's error if the directory or log can't be created.
   [[nodiscard]] static Result<std::unique_ptr<DB>> Open(const Options& options,
                                                         const std::filesystem::path& name);
 

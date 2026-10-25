@@ -19,16 +19,19 @@
 #include "forgedb/status.h"
 #include "forgedb/write_batch.h"
 
+#include "db/db_impl.h"
 #include "db/db_iter.h"
 #include "db/internal_key.h"
 #include "db/write_batch_internal.h"
+#include "env/mem_file_system.h"
 #include "memtable/memtable.h"
 
 namespace forgedb {
 namespace {
 
-std::unique_ptr<DB> OpenDB() {
-  Result<std::unique_ptr<DB>> db = DB::Open(Options{}, "test-db");
+// A new database on its own in-memory file system.
+std::unique_ptr<DB> OpenTestDB() {
+  Result<std::unique_ptr<DB>> db = OpenDB(Options{}, "test-db", std::make_shared<MemFileSystem>());
   EXPECT_TRUE(db.ok()) << db.status().ToString();
   return std::move(db).value();
 }
@@ -64,8 +67,31 @@ TEST(DBTest, OpenRejectsAnEmptyName) {
   EXPECT_EQ(db.status().code(), Status::Code::kInvalidArgument);
 }
 
+TEST(DBTest, OpenCreatesTheDirectoryAndALog) {
+  const auto fs = std::make_shared<MemFileSystem>();
+  ASSERT_TRUE(fs->CreateDir("parent").ok());
+  const Result<std::unique_ptr<DB>> db = OpenDB(Options{}, "parent/db", fs);
+  ASSERT_TRUE(db.ok()) << db.status().ToString();
+  EXPECT_TRUE(fs->FileExists(std::filesystem::path("parent/db") / kLogFileName).value());
+}
+
+// Until recovery exists (Phase 2.3), reopening must not truncate the log.
+TEST(DBTest, ReopeningAnExistingDatabaseIsRefused) {
+  const auto fs = std::make_shared<MemFileSystem>();
+  {
+    const Result<std::unique_ptr<DB>> db = OpenDB(Options{}, "db", fs);
+    ASSERT_TRUE(db.ok());
+    ASSERT_TRUE((*db)->Put({}, "k", "v").ok());
+  }
+  const std::uint64_t log_size =
+      fs->GetFileSize(std::filesystem::path("db") / kLogFileName).value();
+  const Result<std::unique_ptr<DB>> again = OpenDB(Options{}, "db", fs);
+  EXPECT_EQ(again.status().code(), Status::Code::kNotSupported) << again.status().ToString();
+  EXPECT_EQ(fs->GetFileSize(std::filesystem::path("db") / kLogFileName).value(), log_size);
+}
+
 TEST(DBTest, NewDatabaseIsEmpty) {
-  const std::unique_ptr<DB> db = OpenDB();
+  const std::unique_ptr<DB> db = OpenTestDB();
   EXPECT_EQ(Get(*db, "anything"), "NOT_FOUND");
   EXPECT_EQ(Scan(*db), "");
 }
@@ -73,7 +99,7 @@ TEST(DBTest, NewDatabaseIsEmpty) {
 // --- Put, Delete, Get ---------------------------------------------------------------
 
 TEST(DBTest, PutGetOverwriteDelete) {
-  const std::unique_ptr<DB> db = OpenDB();
+  const std::unique_ptr<DB> db = OpenTestDB();
   ASSERT_TRUE(db->Put({}, "k", "v1").ok());
   EXPECT_EQ(Get(*db, "k"), "v1");
   ASSERT_TRUE(db->Put({}, "k", "v2").ok());
@@ -85,13 +111,13 @@ TEST(DBTest, PutGetOverwriteDelete) {
 }
 
 TEST(DBTest, DeletingAMissingKeyIsNotAnError) {
-  const std::unique_ptr<DB> db = OpenDB();
+  const std::unique_ptr<DB> db = OpenTestDB();
   EXPECT_TRUE(db->Delete({}, "never-written").ok());
   EXPECT_EQ(Get(*db, "never-written"), "NOT_FOUND");
 }
 
 TEST(DBTest, EmptyAndBinaryKeysAndValues) {
-  const std::unique_ptr<DB> db = OpenDB();
+  const std::unique_ptr<DB> db = OpenTestDB();
   const std::string binary("\x00\xff\x00", 3);
   ASSERT_TRUE(db->Put({}, "", "empty key").ok());
   ASSERT_TRUE(db->Put({}, "empty value", "").ok());
@@ -103,7 +129,7 @@ TEST(DBTest, EmptyAndBinaryKeysAndValues) {
 }
 
 TEST(DBTest, SizeLimits) {
-  const std::unique_ptr<DB> db = OpenDB();
+  const std::unique_ptr<DB> db = OpenTestDB();
   const std::string max_key(kMaxKeySize, 'k');
   const std::string long_key(kMaxKeySize + 1, 'k');
   ASSERT_TRUE(db->Put({}, max_key, "ok").ok()) << "the limit itself is allowed";
@@ -126,7 +152,7 @@ TEST(DBTest, SizeLimits) {
 // --- Write ------------------------------------------------------------------------------
 
 TEST(DBTest, WriteAppliesABatchInOrder) {
-  const std::unique_ptr<DB> db = OpenDB();
+  const std::unique_ptr<DB> db = OpenTestDB();
   ASSERT_TRUE(db->Put({}, "gone", "x").ok());
   WriteBatch batch;
   batch.Put("a", "1");
@@ -139,7 +165,7 @@ TEST(DBTest, WriteAppliesABatchInOrder) {
 }
 
 TEST(DBTest, WriteLeavesTheCallersBatchUnchanged) {
-  const std::unique_ptr<DB> db = OpenDB();
+  const std::unique_ptr<DB> db = OpenTestDB();
   WriteBatch batch;
   batch.Put("a", "1");
   const std::string before(WriteBatchInternal::Contents(batch));
@@ -150,7 +176,7 @@ TEST(DBTest, WriteLeavesTheCallersBatchUnchanged) {
 }
 
 TEST(DBTest, EmptyBatchIsANoOp) {
-  const std::unique_ptr<DB> db = OpenDB();
+  const std::unique_ptr<DB> db = OpenTestDB();
   EXPECT_TRUE(db->Write({}, WriteBatch{}).ok());
   EXPECT_EQ(Scan(*db), "");
 }
@@ -158,7 +184,7 @@ TEST(DBTest, EmptyBatchIsANoOp) {
 // --- Iterator -----------------------------------------------------------------------------
 
 TEST(DBTest, IteratorShowsLatestValuesInOrderAndHidesDeletions) {
-  const std::unique_ptr<DB> db = OpenDB();
+  const std::unique_ptr<DB> db = OpenTestDB();
   for (const char* key : {"d", "b", "a", "c", "e"}) {
     ASSERT_TRUE(db->Put({}, key, std::string("old-") + key).ok());
   }
@@ -170,7 +196,7 @@ TEST(DBTest, IteratorShowsLatestValuesInOrderAndHidesDeletions) {
 }
 
 TEST(DBTest, IteratorSeek) {
-  const std::unique_ptr<DB> db = OpenDB();
+  const std::unique_ptr<DB> db = OpenTestDB();
   for (const char* key : {"b", "d", "f"}) {
     ASSERT_TRUE(db->Put({}, key, key).ok());
   }
@@ -196,7 +222,7 @@ TEST(DBTest, IteratorSeek) {
 }
 
 TEST(DBTest, IteratorIsASnapshot) {
-  const std::unique_ptr<DB> db = OpenDB();
+  const std::unique_ptr<DB> db = OpenTestDB();
   ASSERT_TRUE(db->Put({}, "a", "1").ok());
   ASSERT_TRUE(db->Put({}, "b", "1").ok());
   const std::unique_ptr<Iterator> it = db->NewIterator({});
@@ -214,7 +240,7 @@ TEST(DBTest, IteratorIsASnapshot) {
 TEST(DBTest, IteratorKeepsWorkingAfterMoreWrites) {
   // The views it returned stay valid: entries live in the memtable's arena,
   // which the iterator keeps alive and which never moves data.
-  const std::unique_ptr<DB> db = OpenDB();
+  const std::unique_ptr<DB> db = OpenTestDB();
   ASSERT_TRUE(db->Put({}, "key", "value").ok());
   const std::unique_ptr<Iterator> it = db->NewIterator({});
   it->SeekToFirst();
@@ -231,7 +257,7 @@ TEST(DBTest, IteratorKeepsWorkingAfterMoreWrites) {
 // so Next and Seek go through the re-seek path, for both kinds of skipping:
 // older versions of a key, and versions newer than the iterator's snapshot.
 TEST(DBTest, IteratorSkipsManyVersionsByReseeking) {
-  const std::unique_ptr<DB> db = OpenDB();
+  const std::unique_ptr<DB> db = OpenTestDB();
   ASSERT_TRUE(db->Put({}, "a", "a").ok());
   ASSERT_TRUE(db->Put({}, "z", "z").ok());
   for (int i = 0; i < 100; ++i) {
@@ -290,7 +316,7 @@ TEST(DBConcurrencyTest, ReadersNeverSeeHalfABatch) {
   constexpr int kWriters = 2;
   constexpr int kReaders = 3;
   constexpr int kBatchesPerWriter = 3000;
-  const std::unique_ptr<DB> db = OpenDB();
+  const std::unique_ptr<DB> db = OpenTestDB();
   std::atomic<int> writers_done{0};
   std::latch start(kWriters + kReaders);
   std::vector<std::string> failures(kReaders);

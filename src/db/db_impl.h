@@ -1,17 +1,31 @@
-// DBImpl: the DB implementation. Phase 1: one memtable, memory only.
+// DBImpl: the DB implementation. Phase 2.2: one memtable and a write-ahead
+// log, written with group commit.
 //
-// Concurrency
-//   mutex_ guards mem_ and last_sequence_ and serializes writers. A write
-//   inserts its batch into the memtable with sequence numbers above
-//   last_sequence_ and only then advances last_sequence_, all under mutex_.
-//   A read copies mem_ (a reference) and last_sequence_ under mutex_, then
-//   reads the memtable without the lock, at that sequence number. Entries
-//   above it are invisible, so a reader sees each batch entirely or not at
-//   all, and never waits for the memtable itself.
-//   (Phase 2 replaces "writers hold the mutex while inserting" with group
-//   commit and the write-ahead log.)
+// Write path (group commit)
+//   Every Write queues a Writer under mutex_ and waits. The writer at the
+//   front of the queue is the leader. It joins its batch with the batches
+//   queued behind it (up to a size cap) into one group, numbers the group
+//   with the next sequence numbers, and then, with mutex_ released, appends
+//   the group to the log as one record, syncs the log once if any member
+//   asked for sync, and applies the group to the memtable. Back under mutex_
+//   it publishes the group (last_sequence_), hands every member the shared
+//   status, and wakes the next writer in line to lead.
+//
+//   Only the leader touches the log, group_batch_ and the memtable's write
+//   side, and leadership passes under mutex_, so there is always one writer.
+//   Readers never wait for it: they read at last_sequence_, and entries above
+//   it are invisible, so a group appears all at once.
+//
+// Errors
+//   If appending or syncing fails, the log's contents on disk are unknown.
+//   The group is not applied, every member gets the error, and it becomes the
+//   sticky background_error_: every later write fails with it. Reads go on.
 #pragma once
 
+#include <condition_variable>
+#include <cstdint>
+#include <deque>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -20,19 +34,53 @@
 #include "forgedb/db.h"
 
 #include "db/internal_key.h"
+#include "env/file_system.h"
+#include "log/log_writer.h"
 #include "memtable/memtable.h"
 
 namespace forgedb {
 
+// The log file's name inside the database directory. (Phase 2.3 introduces
+// numbered logs, one per memtable; this is log number 1.)
+inline constexpr std::string_view kLogFileName = "000001.log";
+
+// Opens a database on any FileSystem: DB::Open uses the Windows one; tests
+// use MemFileSystem or, from Phase 2.4, the fault-injection file system. The
+// DB keeps the file system alive.
+[[nodiscard]] Result<std::unique_ptr<DB>> OpenDB(const Options& options,
+                                                 const std::filesystem::path& name,
+                                                 std::shared_ptr<FileSystem> file_system);
+
 class DBImpl final : public DB {
  public:
-  explicit DBImpl(const Options& options);
+  // Use OpenDB. `log_file` is the new, empty log.
+  DBImpl(std::shared_ptr<FileSystem> file_system, std::unique_ptr<WritableFile> log_file);
+  ~DBImpl() override;
+  DBImpl(const DBImpl&) = delete;
+  DBImpl& operator=(const DBImpl&) = delete;
+  DBImpl(DBImpl&&) = delete;
+  DBImpl& operator=(DBImpl&&) = delete;
 
   [[nodiscard]] Status Write(const WriteOptions& options, const WriteBatch& batch) override;
   [[nodiscard]] Result<std::string> Get(const ReadOptions& options, std::string_view key) override;
   [[nodiscard]] std::unique_ptr<Iterator> NewIterator(const ReadOptions& options) override;
 
+  // For tests.
+  [[nodiscard]] SequenceNumber LastSequenceForTesting();
+  [[nodiscard]] std::uint64_t GroupsWrittenForTesting();
+
  private:
+  // A Write waiting in the queue.
+  struct Writer {
+    Writer(const WriteBatch* writer_batch, bool writer_sync) noexcept
+        : batch(writer_batch), sync(writer_sync) {}
+    const WriteBatch* batch;
+    bool sync;
+    bool done = false;  // set by the leader that wrote this writer's batch
+    Status status;      // valid once done
+    std::condition_variable cv;
+  };
+
   // What a read needs: the memtable and the sequence number to read at.
   struct ReadView {
     MemTableRef memtable;
@@ -40,9 +88,28 @@ class DBImpl final : public DB {
   };
   [[nodiscard]] ReadView CurrentReadView();
 
+  // Leader only, mutex_ held. Joins the batches of the writers at the front
+  // of the queue into group_batch_; returns the last writer included and
+  // whether the group must be synced.
+  struct Group {
+    Writer* last = nullptr;
+    bool sync = false;
+  };
+  [[nodiscard]] Group BuildGroup();
+
+  std::shared_ptr<FileSystem> file_system_;  // kept alive for the log file
+
   std::mutex mutex_;
+  std::deque<Writer*> writers_;       // guarded by mutex_
+  Status background_error_;           // guarded by mutex_; sticky
   MemTableRef mem_;                   // guarded by mutex_
   SequenceNumber last_sequence_ = 0;  // guarded by mutex_; writes start at 1
+  std::uint64_t groups_written_ = 0;  // guarded by mutex_
+
+  // Used only by the current leader (see the comment at the top).
+  std::unique_ptr<WritableFile> log_file_;
+  log::Writer log_;
+  WriteBatch group_batch_;
 };
 
 }  // namespace forgedb

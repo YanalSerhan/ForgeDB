@@ -5,6 +5,7 @@ find_package(benchmark CONFIG REQUIRED)
 
 add_executable(forgedb_microbench
   crc32c_bench.cpp
+  db_write_bench.cpp
   memtable_bench.cpp
   skip_list_bench.cpp
 )

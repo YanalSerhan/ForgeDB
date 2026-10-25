@@ -145,6 +145,13 @@ void WriteBatchInternal::SetSequence(WriteBatch& batch, SequenceNumber sequence)
   EncodeFixed64(batch.rep_.data(), sequence);
 }
 
+void WriteBatchInternal::Append(WriteBatch& dst, const WriteBatch& src) {
+  const std::uint64_t total = std::uint64_t{dst.Count()} + src.Count();
+  FORGEDB_CHECK(total <= UINT32_MAX);
+  SetCount(dst, static_cast<std::uint32_t>(total));
+  dst.rep_.append(src.rep_, kHeaderSize);
+}
+
 Status WriteBatchInternal::SetContents(WriteBatch& batch, std::string_view contents) {
   if (contents.size() < kHeaderSize) {
     batch.Clear();

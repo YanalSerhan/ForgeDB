@@ -43,7 +43,7 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - [x] Matrix: MSVC × {debug, release, asan} and clang-cl × {debug, asan} (plus a `clangcl-fuzz` build-only entry so that preset can't rot before 2.7; added: ASan canary test, clang-format job)
 - [x] Cache vcpkg binary packages between runs (vcpkg `files` provider + `actions/cache`; the old `x-gha` provider was removed from vcpkg)
 - [x] `ctest --output-on-failure` in every job; upload logs on failure
-- [x] Coverage job with OpenCppCoverage; publish the report as an artifact; gate at 85% from Phase 1 on (gate is `COVERAGE_MIN_LINE_PERCENT` in ci.yml: 0 now, set to 85 when Phase 1 starts)
+- [x] Coverage job with OpenCppCoverage; publish the report as an artifact; gate at 85% from Phase 1 on (gate is `COVERAGE_MIN_LINE_PERCENT` in ci.yml: 85 since the end of Phase 1)
 - [ ] Fuzz smoke job (clang-cl): 60 seconds per target on each PR (from Phase 2 on) (deferred to 2.7, when the first fuzz targets exist)
 
 ### 0.3 Utilities
@@ -85,7 +85,7 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 
 ## Phase 1 — Memtable core (≈2 weeks)
 
-> Exit gate: everything is green in CI (run 40104020951, all 10 jobs). Open: the coverage figure from that run's `coverage (msvc-debug)` job, then `COVERAGE_MIN_LINE_PERCENT` → 85 in `ci.yml`.
+> Phase 1 closed: every exit-gate item met in CI (run 40104020951; line coverage 97.0%, CI coverage gate raised to 85%).
 >
 > Microbenchmark numbers below: `msvc-release`, Intel Core i7-10750H laptop, one run each (Google Benchmark; the 1M insert cases ran a single iteration, so treat them as rough). Raw output is not committed (`bench/results/` is ignored).
 
@@ -140,13 +140,13 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 ### ✅ Exit gate — Phase 1
 - [x] Model test: 1,000,000 random operations agree with `std::map` (several seeds, in CI): 3 seeds × 1,000,000 in `msvc-release`, 100,000 in debug/ASan presets (CI run 40104020951)
 - [x] Concurrency test passes 1,000 iterations (skip list and memtable, `msvc-release`, 1000/1000)
-- [~] ASan clean; coverage ≥ 85% on `src/`: ASan clean (`msvc-asan`, `clangcl-asan`, CI run 40104020951); coverage figure not read yet, CI threshold still 0
+- [x] ASan clean; coverage ≥ 85% on `src/`: ASan clean (`msvc-asan`, `clangcl-asan`, CI run 40104020951); line coverage 97.0% (CI coverage job); CI gate now 85%
 
 ---
 
 ## Phase 2 — Write-ahead log and recovery (≈2 weeks)
 
-> `[~]` items in 2.1: tests pass on Linux (gcc ASan+UBSan, asserts on and off; clang near `-Weverything`) and in the Windows build under Wine; waiting for the MSVC/clang-cl run.
+> `[~]` items in 2.1-2.2: tests pass on Linux (gcc ASan+UBSan; gcc ThreadSanitizer for the write path; clang near `-Weverything`) and in the Windows build under Wine. 2.1 passed every Windows preset except a clang-tidy fix in its test, not yet re-run; 2.2 is waiting for the MSVC/clang-cl run.
 
 ### 2.1 Log format
 - [~] 32 KiB blocks; record header = CRC32C (4) + length (2) + type (1); types FULL, FIRST, MIDDLE, LAST for records spanning blocks
@@ -157,12 +157,13 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - [~] Unit tests: records of every size class, block boundaries, empty records, truncated tail, flipped bits
 
 ### 2.2 Write path with group commit
-- [ ] Writer queue: `std::mutex` + `std::condition_variable`; the first waiting writer becomes leader
-- [ ] Leader merges followers' batches (up to a size cap), assigns sequence numbers, appends **one** log record, calls `Sync` once if any writer asked for `sync = true`
-- [ ] Apply merged batch to the memtable, then wake followers with their status
-- [ ] Sticky background error: after a failed `Sync` or append, refuse all further writes (the log's state on disk is unknown)
-- [ ] Unit test: many threads writing; every acknowledged write is visible; sequence numbers are unique and dense
-- [ ] Microbenchmark: writes/sec with `sync = true`, 1 thread vs 8 threads (shows group commit's effect)
+- [~] Writer queue: `std::mutex` + `std::condition_variable`; the first waiting writer becomes leader
+- [~] Leader merges followers' batches (up to a size cap), assigns sequence numbers, appends **one** log record, calls `Sync` once if any writer asked for `sync = true` (cap: 1 MiB, or leader's batch + 128 KiB when it is small)
+- [~] Apply merged batch to the memtable, then wake followers with their status
+- [~] Sticky background error: after a failed `Sync` or append, refuse all further writes (the log's state on disk is unknown)
+- [~] Unit test: many threads writing; every acknowledged write is visible; sequence numbers are unique and dense (checked by replaying the log)
+- [~] Microbenchmark: writes/sec with `sync = true`, 1 thread vs 8 threads (shows group commit's effect) (code done; numbers pending)
+- [~] `WriteOptions::sync`; DB writes `000001.log` in its directory; tests use `OpenDB(options, name, std::shared_ptr<FileSystem>)` (internal; decided in 2.2); reopening an existing DB is refused until 2.3
 
 ### 2.3 Open, lock and recovery
 - [ ] `LOCK` file locked with `LockFileEx` for the database's lifetime; second open fails with a clear error

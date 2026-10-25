@@ -18,6 +18,8 @@
 
 #include "forgedb/db.h"
 
+#include "db/db_impl.h"
+#include "env/mem_file_system.h"
 #include "model/model_harness.h"
 
 #ifndef FORGEDB_MODEL_TEST_OPERATIONS
@@ -59,7 +61,10 @@ std::vector<std::uint64_t> Seeds() {
 class MemoryDBModelTest : public testing::TestWithParam<std::uint64_t> {};
 
 TEST_P(MemoryDBModelTest, AgreesWithStdMap) {
-  const auto open = [] { return DB::Open(Options{}, "model-test"); };
+  // Each replay gets a new database on its own in-memory file system.
+  const auto open = [] {
+    return OpenDB(Options{}, "model-test", std::make_shared<MemFileSystem>());
+  };
   RunOptions options;
   options.seed = GetParam();
   options.operations = OperationsPerSeed();
