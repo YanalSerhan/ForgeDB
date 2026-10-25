@@ -1,8 +1,9 @@
 #include "support/test_env.h"
 
+#include <charconv>
 #include <cstdio>
 #include <cstdlib>
-#include <exception>
+#include <system_error>
 
 namespace forgedb {
 
@@ -28,13 +29,13 @@ std::uint64_t GetEnvNumber(const char* name, std::uint64_t fallback) {
   if (!value) {
     return fallback;
   }
-  std::size_t used = 0;
-  try {
-    const std::uint64_t number = std::stoull(*value, &used);
-    if (used == value->size()) {
-      return number;
-    }
-  } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): reported below
+  // std::from_chars, not std::stoull: no exceptions (clang-tidy's clang-cl
+  // mode compiles tests without them).
+  std::uint64_t number = 0;
+  const char* const end = value->data() + value->size();
+  const auto [parsed_to, error] = std::from_chars(value->data(), end, number);
+  if (error == std::errc() && parsed_to == end && !value->empty()) {
+    return number;
   }
   std::fprintf(stderr, "%s=%s is not a number\n", name, value->c_str());  // NOLINT
   std::abort();

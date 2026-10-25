@@ -150,7 +150,9 @@ TEST_F(RecoveryTest, SeveralSessionsReplayInOrderAndSequencesContinue) {
 }
 
 TEST_F(RecoveryTest, AnEmptyLogIsFine) {
-  { const std::unique_ptr<DB> db = OpenOrDie(); }  // opened and closed, nothing written
+  {
+    const std::unique_ptr<DB> db = OpenOrDie();
+  }  // opened and closed, nothing written
   const std::unique_ptr<DB> db = OpenOrDie();
   EXPECT_EQ(Scan(*db), "");
   EXPECT_EQ(Info(*db).logs_replayed, std::vector<std::uint64_t>({1}));
