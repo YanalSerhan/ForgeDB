@@ -57,6 +57,8 @@ const char* OpName(FaultInjectionFileSystem::Op op) noexcept {
       return "Sync";
     case Op::kClose:
       return "Close";
+    case Op::kSyncFile:
+      return "SyncFile";
     case Op::kRenameReplace:
       return "RenameReplace";
     case Op::kRemoveFile:
@@ -522,6 +524,22 @@ Result<std::uint64_t> FaultInjectionFileSystem::GetFileSize(const std::filesyste
   return base_->GetFileSize(path);
 }
 
+Status FaultInjectionFileSystem::SyncFile(const std::filesystem::path& path) {
+  const Key key = KeyOf(path);
+  const std::scoped_lock lock(mutex_);
+  FORGEDB_RETURN_IF_ERROR(BeginOperation(Op::kSyncFile));
+  FORGEDB_RETURN_IF_ERROR(Track(key));
+  FORGEDB_RETURN_IF_ERROR(base_->SyncFile(path));
+  // Like WritableFile::Sync: all of the file's data, and its name.
+  if (const auto it = live_.find(key); it != live_.end()) {
+    Node& node = *it->second;
+    node.flushed = node.data.size();
+    node.synced = node.data.size();
+    durable_[key] = it->second;
+  }
+  return Status::OK();
+}
+
 Status FaultInjectionFileSystem::CreateDir(const std::filesystem::path& path) {
   const std::scoped_lock lock(mutex_);
   FORGEDB_RETURN_IF_ERROR(BeginOperation(Op::kCreateDir));
@@ -629,6 +647,8 @@ Status FaultInjectionFileSystem::SimulateCrash(CrashKind kind) {
     std::optional<std::string> contents;  // nullopt: no file under this name
     if (kind == CrashKind::kProcessCrash) {
       if (live) {
+        // Only bytes the process never handed to the OS are lost. The rest
+        // stays in the OS's cache, exactly as unsynced as before.
         contents = live->data.substr(0, static_cast<std::size_t>(live->flushed));
       }
     } else if (live == durable) {
@@ -661,15 +681,22 @@ Status FaultInjectionFileSystem::SimulateCrash(CrashKind kind) {
       record.outcome = CrashedFile::Outcome::kRewritten;
       record.size = contents->size();
     }
+    if (kind == CrashKind::kProcessCrash && live) {
+      live->data.resize(static_cast<std::size_t>(live->flushed));  // tracking goes on
+    }
     if (!status.ok() && first_error.ok()) {
       first_error = status;
     }
     last_crash_.push_back(std::move(record));
   }
 
-  // Everything on disk now is, by definition, durable.
-  live_.clear();
-  durable_.clear();
+  if (kind == CrashKind::kPowerLoss) {
+    // Everything on disk now is, by definition, durable.
+    live_.clear();
+    durable_.clear();
+  }
+  // After a process crash, nothing became more durable: what was not synced
+  // (data, new names, renames, removals) can still be lost by a power loss.
   crash_at_ = 0;
   dead_.store(false);
   return first_error;

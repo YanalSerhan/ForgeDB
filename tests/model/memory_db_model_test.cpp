@@ -9,7 +9,6 @@
 //   FORGEDB_MODEL_OPS=5000000   operations per seed
 //   FORGEDB_MODEL_SEED=17       run only this seed (e.g. to reproduce a failure)
 #include <cstdint>
-#include <cstdlib>
 
 #include <gtest/gtest.h>
 
@@ -23,6 +22,7 @@
 #include "db/db_impl.h"
 #include "env/mem_file_system.h"
 #include "model/model_harness.h"
+#include "support/test_env.h"
 
 #ifndef FORGEDB_MODEL_TEST_OPERATIONS
 #define FORGEDB_MODEL_TEST_OPERATIONS 100000
@@ -31,31 +31,13 @@
 namespace forgedb::model {
 namespace {
 
-std::optional<std::string> GetEnv(const char* name) {
-#ifdef _MSC_VER  // MSVC and clang-cl
-  // _dupenv_s, not std::getenv: the MSVC runtime deprecates getenv (C4996).
-  char* value = nullptr;
-  std::size_t length = 0;
-  if (_dupenv_s(&value, &length, name) != 0 || value == nullptr) {
-    return std::nullopt;
-  }
-  std::string result(value);
-  std::free(value);  // NOLINT(cppcoreguidelines-no-malloc,cppcoreguidelines-owning-memory)
-  return result;
-#else
-  const char* value = std::getenv(name);  // NOLINT(concurrency-mt-unsafe): read before threads
-  return value == nullptr ? std::nullopt : std::optional<std::string>(value);
-#endif
-}
-
 std::size_t OperationsPerSeed() {
-  const std::optional<std::string> value = GetEnv("FORGEDB_MODEL_OPS");
-  return value ? static_cast<std::size_t>(std::stoull(*value)) : FORGEDB_MODEL_TEST_OPERATIONS;
+  return static_cast<std::size_t>(GetEnvNumber("FORGEDB_MODEL_OPS", FORGEDB_MODEL_TEST_OPERATIONS));
 }
 
 std::vector<std::uint64_t> Seeds() {
-  if (const std::optional<std::string> seed = GetEnv("FORGEDB_MODEL_SEED")) {
-    return {std::stoull(*seed)};
+  if (GetEnv("FORGEDB_MODEL_SEED")) {
+    return {GetEnvNumber("FORGEDB_MODEL_SEED", 0)};
   }
   return {1, 2, 3};
 }

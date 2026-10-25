@@ -33,8 +33,10 @@ Code: `src/db/filename.*`, `OpenDB` in `src/db/db_impl.cpp`. Tests: `tests/unit/
   every later record, in the same log or the next, starts at the previous record's sequence plus
   its count (an empty batch uses no numbers); otherwise the open fails with `Corruption`.
   A torn tail is ignored (each log is read on its own: a torn tail ends that log, not the replay);
-  mid-log damage fails the open. New writes go to a new log numbered one above the highest
-  existing log, so a torn tail is never appended to. Logs are not deleted before Phase 3.
+  mid-log damage fails the open. Every replayed log is then synced (`FileSystem::SyncFile`), so
+  data recovered from it cannot be lost by a later crash once newer writes depend on it. New
+  writes go to a new log numbered one above the highest existing log, so a torn tail is never
+  appended to. Logs are not deleted before Phase 3.
 
 ## Primitive encodings
 

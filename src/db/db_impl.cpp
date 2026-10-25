@@ -156,6 +156,14 @@ Result<std::unique_ptr<DB>> OpenDB(const Options& /*options*/, const std::filesy
         ReplayLog(fs, name, number, *state.memtable, state.last_sequence, state.recovery));
   }
 
+  // Make what was just recovered durable before any new write can depend on
+  // it. The logs may hold data that was never synced (written without sync,
+  // or left in the OS's cache by a process crash). Without this, a later
+  // power loss could lose it while newer synced writes survive: a hole.
+  for (const std::uint64_t number : logs) {
+    FORGEDB_RETURN_IF_ERROR(fs.SyncFile(LogFileName(name, number)));
+  }
+
   // New writes go to a new log, so a torn tail in the old one stays where it
   // is (and is ignored again on the next recovery).
   if (!logs.empty() && logs.back() == UINT64_MAX) {

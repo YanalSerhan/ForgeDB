@@ -260,6 +260,14 @@ Result<std::uint64_t> MemFileSystem::GetFileSize(const std::filesystem::path& pa
   return static_cast<std::uint64_t>(data->contents.size());
 }
 
+Status MemFileSystem::SyncFile(const std::filesystem::path& path) {
+  const std::scoped_lock lock(mutex_);
+  if (!Find(KeyOf(path))) {
+    return NotFound("SyncFile", path);
+  }
+  return Status::OK();  // memory has no cache to flush
+}
+
 Status MemFileSystem::CreateDir(const std::filesystem::path& path) {
   const Key key = KeyOf(path);
   const std::scoped_lock lock(mutex_);

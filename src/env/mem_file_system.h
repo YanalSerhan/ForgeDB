@@ -44,6 +44,7 @@ class MemFileSystem final : public FileSystem {
   [[nodiscard]] Result<std::vector<std::string>> GetChildren(
       const std::filesystem::path& dir) override;
   [[nodiscard]] Result<std::uint64_t> GetFileSize(const std::filesystem::path& path) override;
+  [[nodiscard]] Status SyncFile(const std::filesystem::path& path) override;
   [[nodiscard]] Status CreateDir(const std::filesystem::path& path) override;
   [[nodiscard]] Result<std::unique_ptr<FileLock>> LockFile(
       const std::filesystem::path& path) override;

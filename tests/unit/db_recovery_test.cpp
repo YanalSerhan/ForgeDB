@@ -25,6 +25,7 @@
 #include "env/file_system.h"
 #include "env/mem_file_system.h"
 #include "log/log_writer.h"
+#include "support/fault_injection_file_system.h"
 
 namespace forgedb {
 namespace {
@@ -261,6 +262,49 @@ TEST_F(RecoveryTest, EmptyBatchRecordsDoNotUseSequenceNumbers) {
   const std::unique_ptr<DB> db = OpenOrDie();
   EXPECT_EQ(Scan(*db), "a=1 ");
   EXPECT_EQ(LastSequence(*db), 1U);
+}
+
+// --- Durability of recovered data ---------------------------------------------------
+
+// Found by the crash torture test (2.5): data recovered from a log that was
+// never synced must be made durable before newer writes can depend on it.
+// Otherwise a power loss can drop the old log's tail while the new log's
+// synced writes survive, and the next open sees a gap in sequence numbers.
+TEST(RecoveryDurabilityTest, RecoveredLogsAreSyncedBeforeNewWrites) {
+  for (std::uint64_t seed = 1; seed <= 20; ++seed) {
+    SCOPED_TRACE(seed);
+    FaultInjectionFileSystem::Options options;
+    options.seed = seed;
+    options.unsynced_tail = FaultInjectionFileSystem::UnsyncedTail::kDrop;
+    const auto fs =
+        std::make_shared<FaultInjectionFileSystem>(std::make_shared<MemFileSystem>(), options);
+    {
+      const std::unique_ptr<DB> db = std::move(OpenDB(Options{}, "db", fs)).value();
+      ASSERT_TRUE(db->Put({}, "old", "unsynced").ok());
+    }  // closed cleanly: flushed, not synced
+    {
+      const std::unique_ptr<DB> db = std::move(OpenDB(Options{}, "db", fs)).value();
+      ASSERT_TRUE(db->Put({.sync = true}, "new", "synced").ok());
+    }
+    ASSERT_TRUE(fs->SimulateCrash(FaultInjectionFileSystem::CrashKind::kPowerLoss).ok());
+    const Result<std::unique_ptr<DB>> db = OpenDB(Options{}, "db", fs);
+    ASSERT_TRUE(db.ok()) << db.status().ToString();
+    EXPECT_EQ(Get(**db, "old"), "unsynced") << "recovered, so made durable by the second open";
+    EXPECT_EQ(Get(**db, "new"), "synced");
+  }
+}
+
+TEST(RecoveryDurabilityTest, ASyncFailureFailsTheOpen) {
+  const auto fs = std::make_shared<FaultInjectionFileSystem>(std::make_shared<MemFileSystem>());
+  {
+    const std::unique_ptr<DB> db = std::move(OpenDB(Options{}, "db", fs)).value();
+    ASSERT_TRUE(db->Put({}, "k", "v").ok());
+  }
+  fs->FailNth(FaultInjectionFileSystem::Op::kSyncFile, 1);
+  EXPECT_EQ(OpenDB(Options{}, "db", fs).status().code(), Status::Code::kIOError);
+  const Result<std::unique_ptr<DB>> db = OpenDB(Options{}, "db", fs);
+  ASSERT_TRUE(db.ok()) << "the failed open released LOCK: " << db.status().ToString();
+  EXPECT_EQ(Get(**db, "k"), "v");
 }
 
 // --- LOCK -----------------------------------------------------------------------------

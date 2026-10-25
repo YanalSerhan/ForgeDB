@@ -156,6 +156,13 @@ class FileSystem {
 
   [[nodiscard]] virtual Result<std::uint64_t> GetFileSize(const std::filesystem::path& path) = 0;
 
+  // Forces an existing file's contents and size to stable storage, the same
+  // guarantee as WritableFile::Sync, without changing the file. For files
+  // written earlier and no longer open, e.g. logs replayed by recovery.
+  // NotFound if it doesn't exist. Do not call it on a file that is open for
+  // writing (on Windows that open would conflict).
+  [[nodiscard]] virtual Status SyncFile(const std::filesystem::path& path) = 0;
+
   // Creates a directory; OK if it already exists. Its parent must exist.
   [[nodiscard]] virtual Status CreateDir(const std::filesystem::path& path) = 0;
 

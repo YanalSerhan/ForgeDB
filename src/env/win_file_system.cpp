@@ -462,6 +462,31 @@ Result<std::uint64_t> WinFileSystem::GetFileSize(const std::filesystem::path& pa
   return (static_cast<std::uint64_t>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
 }
 
+Status WinFileSystem::SyncFile(const std::filesystem::path& path) {
+  // FlushFileBuffers needs a handle with GENERIC_WRITE (F2) and flushes the
+  // file's cached data, which belongs to the file, not to the handle that
+  // wrote it (ADR 0002, rule 13). OPEN_EXISTING: nothing is created or
+  // truncated. Retried like the other opens that scanners can block.
+  UniqueHandle file;
+  const DWORD error = RetryWhileShared([&] {
+    HANDLE handle = ::CreateFileW(path.c_str(), GENERIC_WRITE, kWriterShareMode, nullptr,
+                                  OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    const DWORD result = handle == INVALID_HANDLE_VALUE ? ::GetLastError() : ERROR_SUCCESS;
+    file.Reset(handle);
+    return result;
+  });
+  if (error != ERROR_SUCCESS) {
+    return ErrorStatus(error, "CreateFileW (sync)", path);
+  }
+  if (::FlushFileBuffers(file.Get()) == FALSE) {
+    return ErrorStatus(::GetLastError(), "FlushFileBuffers", path);
+  }
+  if (::CloseHandle(file.Release()) == FALSE) {
+    return ErrorStatus(::GetLastError(), "CloseHandle", path);
+  }
+  return Status::OK();
+}
+
 Status WinFileSystem::CreateDir(const std::filesystem::path& path) {
   if (::CreateDirectoryW(path.c_str(), nullptr) != FALSE) {
     return Status::OK();

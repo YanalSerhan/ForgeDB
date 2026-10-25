@@ -103,6 +103,7 @@ class ControlledFileSystem final : public FileSystem {
   Result<std::uint64_t> GetFileSize(const std::filesystem::path& path) override {
     return base_.GetFileSize(path);
   }
+  Status SyncFile(const std::filesystem::path& path) override { return base_.SyncFile(path); }
   Status CreateDir(const std::filesystem::path& path) override { return base_.CreateDir(path); }
   Result<std::unique_ptr<FileLock>> LockFile(const std::filesystem::path& path) override {
     return base_.LockFile(path);

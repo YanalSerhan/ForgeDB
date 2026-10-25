@@ -1,7 +1,7 @@
 # ADR 0002: Durability rules on Windows
 
 - **Status:** Proposed. Rules 1-10 and 12 are implemented in `src/env/` (Phase 0.4); rule 11, an
-  assumption, was added in Phase 2.4. The open question at the end needs a decision before
+  assumption, was added in Phase 2.4; rule 13 in Phase 2.5. The open question at the end needs a decision before
   Phase 3. This ADR is the Phase 0 exit-gate item "reviewed line by line".
 - **Date:** 2026-10-23
 
@@ -143,6 +143,12 @@ Rules, each implemented in `src/env/win_file_system.cpp` unless noted.
     don't share a file position; `ERROR_HANDLE_EOF` means "0 bytes" (F11). Windows serializes
     synchronous I/O on one handle, so these reads are correct but not parallel; revisit in Phase 5
     if profiling shows contention.
+13. **Syncing a closed file.** `FileSystem::SyncFile` opens an existing file with `GENERIC_WRITE`
+    (`OPEN_EXISTING`, so nothing is created or truncated) and calls `FlushFileBuffers`. Recovery
+    uses it to make every replayed log durable before new writes can depend on its data (found by
+    the crash torture test, Phase 2.5). *Interpretation:* F2 says `FlushFileBuffers` writes "all
+    the buffered information for a specified file"; the cache belongs to the file, so a new handle
+    flushes data written through an earlier, closed one.
 
 ## Open question: does recovery trust the rename of CURRENT?
 

@@ -183,14 +183,16 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - [x] ADR 0002 rule 11: directories are assumed durable once created (undocumented; the model assumes it too)
 
 ### 2.5 Crash torture test
-- [ ] Loop: open DB on the fault-injection FS, run random operations (random `sync` flags), crash at a random point, reopen, verify
-- [ ] Verification:
-  - [ ] Every write acknowledged with `sync = true` is present
-  - [ ] Final state equals the model at **some** point between the last synced write and the last acknowledged write (prefix consistency, no holes)
-  - [ ] Recovery never fails on a torn tail
-- [ ] Error-injection variant: after an injected failure, the DB refuses writes and reopens cleanly
-- [ ] Iterations configurable; CI runs a short version, long runs locally
-- [ ] Run with `zero_pages_in_unsynced_tail` too; if recovery then fails on crashes it must survive, propose a refinement of ADR 0004 (decision from 2.4)
+- [x] Loop: open DB on the fault-injection FS, run random operations (random `sync` flags), crash at a random point, reopen, verify (`tests/crash/crash_torture_test.cpp`, executable `forgedb_crash_tests`): each cycle ends with a power loss, a process crash or a clean close, between writes or in the middle of a file operation (`CrashAtOperation`); variants for each kind of unsynced tail (torn, partly kept, dropped)
+- [x] Verification:
+  - [x] Every write acknowledged with `sync = true` is present (after a process crash or clean close: every acknowledged write)
+  - [x] Final state equals the model at **some** point between the last synced write and the last acknowledged write (prefix consistency, no holes); a write that failed may or may not be there. Also before each crash: readers see exactly the acknowledged writes
+  - [x] Recovery never fails on a torn tail
+- [x] Error-injection variant: after an injected failure, the DB refuses writes and reopens cleanly
+- [x] Iterations configurable (`FORGEDB_CRASH_CYCLES`, `FORGEDB_CRASH_SEED`); CI runs 3 seeds × 400 cycles per variant in release builds (100 in debug and sanitizer builds), long runs locally
+- [x] Bug found and fixed: data recovered from a log was never synced, so a later power loss could drop an old log's tail while newer synced writes survived (a hole; the next open failed with a sequence gap). Open now syncs every replayed log before creating the new one (new `FileSystem::SyncFile`; ADR 0002 rule 13)
+- [x] Bug found and fixed in the 2.4 model: a simulated process crash made every file durable; now unsynced data stays at risk of a later power loss
+- [x] Ran with `zero_pages_in_unsynced_tail` (decision from 2.4): ADR 0004's strict rule then refuses some opens with `Corruption` (17 of 600 cycles in the first run). Decided in 2.5: cure deferred to 3.6; until then the test checks the weaker promise (a correct prefix or `Corruption`, never wrong data)
 - [ ] Renames and removals: once Phase 3.6 uses them, run with the default (not durable) and settle ADR 0002's open question
 
 ### 2.6 Process-kill test (real crash, Windows)
@@ -251,6 +253,7 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - [ ] `Version` (files per level) and `VersionSet` (current version, applies edits)
 - [ ] Recovery: read `CURRENT` → replay MANIFEST → replay logs newer than its log number (until then, 2.3 replays every log)
 - [ ] On open, delete files not referenced by the current version (leftovers from a crash)
+- [ ] Zero-filled pages in the newest log (from 2.5): at open, write the recovered memtable to a synced table and record it in the MANIFEST, so old logs are never replayed again; then the newest log stops at its first problem (point-in-time, reported) instead of failing the open. Amend ADR 0004, and switch `CrashTortureTest.ZeroFilledPagesInUnsyncedTails` to "always opens"
 
 ### 3.7 Merged reads
 - [ ] Merging iterator (min-heap over child iterators: memtable, immutable, L0 files, levels)
@@ -389,3 +392,4 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - [ ] Durability needs a drive that honors flush requests; "Turn off Windows write-cache buffer flushing" voids it (ADR 0002, F4)
 - [ ] File systems without POSIX delete (FAT32, some network shares, Wine) keep a removed file's name until its last handle closes (ADR 0002, rule 7)
 - [ ] Database paths are limited to MAX_PATH unless Windows long paths are enabled
+- [ ] Until Phase 3.6: if a power loss leaves unsynced log pages written out of order (undocumented whether NTFS can), the open may fail with `Corruption` instead of dropping the unsynced writes (ADR 0004; measured in 2.5)

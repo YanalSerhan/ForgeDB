@@ -271,6 +271,55 @@ TEST(FaultInjectionFileSystemTest, ProcessCrashKeepsEveryFlushedByte) {
   EXPECT_EQ(Contents(*setup.base, File("old")), std::nullopt);
 }
 
+// SyncFile: the same guarantee as WritableFile::Sync, for a closed file.
+TEST(FaultInjectionFileSystemTest, SyncFileMakesAClosedFileDurable) {
+  for (std::uint64_t seed = 1; seed <= 30; ++seed) {
+    const TestFs setup(WithSeed(seed));
+    {
+      const std::unique_ptr<WritableFile> file = Create(*setup.fs, File("f"));
+      ASSERT_TRUE(file->Append("written, closed, never synced").ok());
+      ASSERT_TRUE(file->Close().ok());
+    }
+    ASSERT_TRUE(setup.fs->SyncFile(File("f")).ok());
+    ASSERT_TRUE(setup.fs->SimulateCrash(CrashKind::kPowerLoss).ok());
+    EXPECT_EQ(Contents(*setup.base, File("f")), "written, closed, never synced");
+  }
+  const TestFs setup;
+  EXPECT_EQ(setup.fs->SyncFile(File("missing")).code(), Status::Code::kNotFound);
+}
+
+// A process crash leaves unsynced data in the OS's cache: still unsynced.
+TEST(FaultInjectionFileSystemTest, AfterAProcessCrashUnsyncedDataCanStillBeLost) {
+  Options options;
+  options.unsynced_tail = UnsyncedTail::kDrop;
+  std::set<std::string> new_file_outcomes;
+  for (std::uint64_t seed = 1; seed <= 40; ++seed) {
+    options.seed = seed;
+    const TestFs setup(options);
+    {
+      const std::unique_ptr<WritableFile> file = Create(*setup.fs, File("f"));
+      ASSERT_TRUE(file->Append("synced").ok());
+      ASSERT_TRUE(file->Sync().ok());
+      ASSERT_TRUE(file->Append("+flushed").ok());
+      ASSERT_TRUE(file->Close().ok());
+    }
+    {
+      const std::unique_ptr<WritableFile> file = Create(*setup.fs, File("new"));
+      ASSERT_TRUE(file->Append("never synced").ok());
+      ASSERT_TRUE(file->Close().ok());
+    }
+    ASSERT_TRUE(setup.fs->SimulateCrash(CrashKind::kProcessCrash).ok());
+    ASSERT_EQ(Contents(*setup.base, File("f")), "synced+flushed");
+    ASSERT_EQ(Contents(*setup.base, File("new")), "never synced");
+
+    ASSERT_TRUE(setup.fs->SimulateCrash(CrashKind::kPowerLoss).ok());
+    EXPECT_EQ(Contents(*setup.base, File("f")), "synced");
+    new_file_outcomes.insert(Contents(*setup.base, File("new")).value_or("<missing>"));
+  }
+  EXPECT_EQ(new_file_outcomes, (std::set<std::string>{"<missing>", ""}))
+      << "the never-synced file may vanish (its bytes are dropped by kDrop)";
+}
+
 // --- Power loss: names ---------------------------------------------------------------
 
 TEST(FaultInjectionFileSystemTest, AFileNeverSyncedMayVanish) {
@@ -578,6 +627,7 @@ TEST(FaultInjectionFileSystemTest, EveryOperationCanBeFailed) {
                [](FS& fs, FilePtr&) { return fs.RenameReplace(File("existing"), File("new")); });
   expect_fails(Op::kRemoveFile, [](FS& fs, FilePtr&) { return fs.RemoveFile(File("existing")); });
   expect_fails(Op::kCreateDir, [](FS& fs, FilePtr&) { return fs.CreateDir(File("new")); });
+  expect_fails(Op::kSyncFile, [](FS& fs, FilePtr&) { return fs.SyncFile(File("existing")); });
   expect_fails(Op::kLockFile, [](FS& fs, FilePtr&) { return fs.LockFile(File("new")).status(); });
 }
 

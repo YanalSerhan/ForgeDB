@@ -2,9 +2,10 @@ find_package(GTest CONFIG REQUIRED)
 include(GoogleTest)
 
 # Test-only helpers shared by the test executables: the fault-injection file
-# system (TODO 2.4). Not part of the engine.
+# system (TODO 2.4) and environment-variable overrides. Not part of the engine.
 add_library(forgedb_test_support STATIC
   support/fault_injection_file_system.cpp
+  support/test_env.cpp
 )
 target_link_libraries(forgedb_test_support PUBLIC forgedb::forgedb)
 target_include_directories(forgedb_test_support PUBLIC
@@ -54,7 +55,8 @@ add_executable(forgedb_model_tests
   model/model_harness.cpp
   model/model_harness_test.cpp
 )
-target_link_libraries(forgedb_model_tests PRIVATE forgedb::forgedb GTest::gtest_main)
+target_link_libraries(forgedb_model_tests PRIVATE
+  forgedb::forgedb forgedb_test_support GTest::gtest_main)
 target_include_directories(forgedb_model_tests PRIVATE
   "${PROJECT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}")
 if(CMAKE_BUILD_TYPE STREQUAL "Release" AND NOT FORGEDB_ASAN)
@@ -66,6 +68,25 @@ target_compile_definitions(forgedb_model_tests PRIVATE
   FORGEDB_MODEL_TEST_OPERATIONS=${forgedb_model_operations})
 forgedb_target_defaults(forgedb_model_tests)
 gtest_discover_tests(forgedb_model_tests DISCOVERY_MODE PRE_TEST)
+
+# Crash torture test (TODO 2.5): random crashes on the fault-injection file
+# system, checking recovery after each. Optimized builds run more crash cycles
+# per test than debug and sanitizer builds. FORGEDB_CRASH_CYCLES and
+# FORGEDB_CRASH_SEED override at run time (long runs: locally).
+add_executable(forgedb_crash_tests
+  crash/crash_torture_test.cpp
+)
+target_link_libraries(forgedb_crash_tests PRIVATE
+  forgedb::forgedb forgedb_test_support GTest::gtest_main)
+if(CMAKE_BUILD_TYPE STREQUAL "Release" AND NOT FORGEDB_ASAN)
+  set(forgedb_crash_cycles 400)
+else()
+  set(forgedb_crash_cycles 100)
+endif()
+target_compile_definitions(forgedb_crash_tests PRIVATE
+  FORGEDB_CRASH_TEST_CYCLES=${forgedb_crash_cycles})
+forgedb_target_defaults(forgedb_crash_tests)
+gtest_discover_tests(forgedb_crash_tests DISCOVERY_MODE PRE_TEST)
 
 # ASan canary (sanitizer builds only): a program that overflows a heap buffer
 # on purpose. The test passes only if ASan's report appears, which proves the

@@ -44,9 +44,14 @@ The reader cannot know where the last `Sync` ended, so it needs a rule that uses
   one. Whether NTFS can do that for an append-only file is not documented by Microsoft; it is not
   known to us. The fault-injection file system (Phase 2.4) keeps a prefix of the unsynced data plus
   a torn final write by default, so it does not produce this case; its
-  `zero_pages_in_unsynced_tail` option does (zeroed 4 KiB pages followed by surviving data). The
-  crash torture test (2.5) runs with that option to measure the effect and decide whether this
-  rule needs a refinement.
+  `zero_pages_in_unsynced_tail` option does (zeroed 4 KiB pages followed by surviving data).
+  *Measured in 2.5:* with that option the crash torture test sees this rule refuse to open the
+  database after some power losses (17 of 600 cycles in the first run; in a targeted experiment
+  with ~33 KB of unsynced log, 239 of 500). Never wrong data: the refusal is `Corruption`.
+  *Decided in 2.5:* keep this rule for now and cure it in Phase 3.6, where open writes the
+  recovered data to a synced table and the MANIFEST, so a log is replayed only while it is the
+  newest; the newest log can then stop at its first problem (point-in-time, reported) without
+  ever being read again under the strict rule. This ADR will be amended then.
 - A torn record whose own payload contains bytes that form a valid fragment (e.g. a log file
   stored as a value) is reported as corruption: a false alarm, never a silent loss.
 - Tests: `tests/unit/log_test.cpp` (every truncation point, every single-bit flip, zero and garbage

@@ -206,6 +206,14 @@ TYPED_TEST(FileSystemConformanceTest, SyncKeepsDataAndFileUsable) {
   EXPECT_EQ(this->ReadAll(path).value(), "first second");
 }
 
+TYPED_TEST(FileSystemConformanceTest, SyncFileKeepsAClosedFileUnchanged) {
+  const auto path = this->Path("file");
+  this->WriteFile(path, "contents");
+  EXPECT_TRUE(IsOk(this->fs_->SyncFile(path)));
+  EXPECT_EQ(this->ReadAll(path).value(), "contents");
+  EXPECT_TRUE(HasCode(this->fs_->SyncFile(this->Path("missing")), Status::Code::kNotFound));
+}
+
 TYPED_TEST(FileSystemConformanceTest, FlushMakesDataVisibleToReaders) {
   const auto path = this->Path("growing");
   Result<std::unique_ptr<WritableFile>> writer = this->fs_->NewWritableFile(path);

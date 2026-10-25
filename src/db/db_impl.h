@@ -27,11 +27,12 @@
 //   OpenDB locks <db>/LOCK for the DB's lifetime, replays every log in the
 //   directory in number order into a fresh memtable, checks that sequence
 //   numbers continue exactly from record to record and from log to log,
-//   restores the last sequence number, and starts a new log numbered one
-//   above the highest. A torn tail ends a log quietly; mid-log corruption, a
-//   malformed batch or a sequence gap fails the open (ADR 0004). Phase 2 never
-//   deletes logs: their contents exist nowhere else until Phase 3 flushes
-//   memtables to table files.
+//   restores the last sequence number, syncs every replayed log (what was
+//   recovered must not be lost once newer writes depend on it; Phase 2.5),
+//   and starts a new log numbered one above the highest. A torn tail ends a
+//   log quietly; mid-log corruption, a malformed batch or a sequence gap fails
+//   the open (ADR 0004). Phase 2 never deletes logs: their contents exist
+//   nowhere else until Phase 3 flushes memtables to table files.
 #pragma once
 
 #include <condition_variable>

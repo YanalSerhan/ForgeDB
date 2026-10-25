@@ -28,9 +28,11 @@
 //   kProcessCrash  The process dies; the operating system keeps running.
 //     - Everything flushed survives, with every rename and removal; only bytes
 //       appended but never flushed are lost.
+//     - Nothing becomes more durable: what was not synced is still in the
+//       OS's cache, and a later power loss can still lose it.
 //
 // Files that existed before the wrapper first touched them (including every
-// file after a SimulateCrash) are treated as fully durable.
+// file after a simulated power loss) are treated as fully durable.
 //
 // After a crash, every file and lock object handed out before it is dead:
 // every call returns IOError and Close writes nothing, so the crashed DB can
@@ -114,12 +116,13 @@ class FaultInjectionFileSystem final : public FileSystem {
     kFlush,
     kSync,
     kClose,
+    kSyncFile,
     kRenameReplace,
     kRemoveFile,
     kCreateDir,
     kLockFile,
   };
-  static constexpr std::size_t kOpCount = 9;
+  static constexpr std::size_t kOpCount = 10;
 
   // One file's fate in the last SimulateCrash.
   struct CrashedFile {
@@ -156,8 +159,9 @@ class FaultInjectionFileSystem final : public FileSystem {
   // --- Crashing ---
 
   // Rewrites the wrapped file system into one possible state after a crash
-  // of the given kind (see the top of this file). Afterwards every file is
-  // durable, the process is alive again and earlier handles are dead.
+  // of the given kind (see the top of this file). Afterwards the process is
+  // alive again and earlier handles are dead. After a power loss every file is
+  // durable; after a process crash only what was durable before still is.
   // Faults set with FailNth/FailWithProbability stay in force.
   [[nodiscard]] Status SimulateCrash(CrashKind kind);
   // What the last SimulateCrash did to each file it had to decide on.
@@ -178,6 +182,7 @@ class FaultInjectionFileSystem final : public FileSystem {
   [[nodiscard]] Result<std::vector<std::string>> GetChildren(
       const std::filesystem::path& dir) override;
   [[nodiscard]] Result<std::uint64_t> GetFileSize(const std::filesystem::path& path) override;
+  [[nodiscard]] Status SyncFile(const std::filesystem::path& path) override;
   [[nodiscard]] Status CreateDir(const std::filesystem::path& path) override;
   [[nodiscard]] Result<std::unique_ptr<FileLock>> LockFile(
       const std::filesystem::path& path) override;
