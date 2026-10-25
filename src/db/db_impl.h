@@ -20,6 +20,18 @@
 //   If appending or syncing fails, the log's contents on disk are unknown.
 //   The group is not applied, every member gets the error, and it becomes the
 //   sticky background_error_: every later write fails with it. Reads go on.
+//   (Such a write may still be in the log and reappear after recovery: like
+//   any write that returned an error, its outcome is unknown.)
+//
+// Open and recovery (Phase 2.3)
+//   OpenDB locks <db>/LOCK for the DB's lifetime, replays every log in the
+//   directory in number order into a fresh memtable, checks that sequence
+//   numbers continue exactly from record to record and from log to log,
+//   restores the last sequence number, and starts a new log numbered one
+//   above the highest. A torn tail ends a log quietly; mid-log corruption, a
+//   malformed batch or a sequence gap fails the open (ADR 0004). Phase 2 never
+//   deletes logs: their contents exist nowhere else until Phase 3 flushes
+//   memtables to table files.
 #pragma once
 
 #include <condition_variable>
@@ -30,6 +42,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "forgedb/db.h"
 
@@ -40,9 +53,18 @@
 
 namespace forgedb {
 
-// The log file's name inside the database directory. (Phase 2.3 introduces
-// numbered logs, one per memtable; this is log number 1.)
-inline constexpr std::string_view kLogFileName = "000001.log";
+// What recovery found when the database was opened. For tests and diagnostics.
+struct RecoveryInfo {
+  struct TornTail {
+    std::uint64_t log_number = 0;
+    std::uint64_t offset = 0;  // where the ignored tail began in that log
+    std::string reason;
+  };
+  std::vector<std::uint64_t> logs_replayed;  // in replay order
+  std::uint64_t records_replayed = 0;
+  std::vector<TornTail> torn_tails;
+  std::uint64_t new_log_number = 0;  // the log this session writes
+};
 
 // Opens a database on any FileSystem: DB::Open uses the Windows one; tests
 // use MemFileSystem or, from Phase 2.4, the fault-injection file system. The
@@ -53,8 +75,18 @@ inline constexpr std::string_view kLogFileName = "000001.log";
 
 class DBImpl final : public DB {
  public:
-  // Use OpenDB. `log_file` is the new, empty log.
-  DBImpl(std::shared_ptr<FileSystem> file_system, std::unique_ptr<WritableFile> log_file);
+  // Everything OpenDB prepares for a DBImpl.
+  struct OpenedState {
+    std::shared_ptr<FileSystem> file_system;
+    std::unique_ptr<FileLock> lock;          // <db>/LOCK, held until destruction
+    MemTableRef memtable;                    // holds the replayed logs
+    SequenceNumber last_sequence = 0;        // of the last replayed write
+    std::unique_ptr<WritableFile> log_file;  // the new, empty log
+    RecoveryInfo recovery;
+  };
+
+  // Use OpenDB.
+  explicit DBImpl(OpenedState state);
   ~DBImpl() override;
   DBImpl(const DBImpl&) = delete;
   DBImpl& operator=(const DBImpl&) = delete;
@@ -68,6 +100,7 @@ class DBImpl final : public DB {
   // For tests.
   [[nodiscard]] SequenceNumber LastSequenceForTesting();
   [[nodiscard]] std::uint64_t GroupsWrittenForTesting();
+  [[nodiscard]] const RecoveryInfo& RecoveryInfoForTesting() const noexcept { return recovery_; }
 
  private:
   // A Write waiting in the queue.
@@ -97,13 +130,15 @@ class DBImpl final : public DB {
   };
   [[nodiscard]] Group BuildGroup();
 
-  std::shared_ptr<FileSystem> file_system_;  // kept alive for the log file
+  std::shared_ptr<FileSystem> file_system_;  // kept alive for the files below
+  std::unique_ptr<FileLock> lock_;
+  RecoveryInfo recovery_;  // set once by the constructor
 
   std::mutex mutex_;
   std::deque<Writer*> writers_;       // guarded by mutex_
   Status background_error_;           // guarded by mutex_; sticky
   MemTableRef mem_;                   // guarded by mutex_
-  SequenceNumber last_sequence_ = 0;  // guarded by mutex_; writes start at 1
+  SequenceNumber last_sequence_ = 0;  // guarded by mutex_; recovered, then advanced
   std::uint64_t groups_written_ = 0;  // guarded by mutex_
 
   // Used only by the current leader (see the comment at the top).

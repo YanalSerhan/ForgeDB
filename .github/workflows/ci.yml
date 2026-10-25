@@ -16,7 +16,7 @@ concurrency:
 
 env:
   # Coverage gate. TODO.md 0.2: report-only during Phase 0, raise to 85 from Phase 1 on.
-  COVERAGE_MIN_LINE_PERCENT: 0
+  COVERAGE_MIN_LINE_PERCENT: 85
 
 jobs:
   build:

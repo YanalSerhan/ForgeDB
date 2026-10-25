@@ -71,6 +71,8 @@ std::string Describe(const Op& op) {
       return "Scan()";
     case Op::Kind::kSeek:
       return "Seek(" + Quote(op.key) + ") + " + std::to_string(op.next_count) + " x Next()";
+    case Op::Kind::kReopen:
+      return "Reopen()";
   }
   return "?";
 }
@@ -81,6 +83,9 @@ OpGenerator::OpGenerator(std::uint64_t seed, std::size_t total_operations, Gener
     : options_(options),
       scan_probability_(
           std::min(0.01, static_cast<double>(options.expected_scans) /
+                             static_cast<double>(std::max<std::size_t>(total_operations, 1)))),
+      reopen_probability_(
+          std::min(0.01, static_cast<double>(options.expected_reopens) /
                              static_cast<double>(std::max<std::size_t>(total_operations, 1)))),
       rng_(seed) {}
 
@@ -139,6 +144,10 @@ Op OpGenerator::Next() {
   Op op;
   if (Chance(scan_probability_)) {
     op.kind = Op::Kind::kScan;
+    return op;
+  }
+  if (reopen_probability_ > 0 && Chance(reopen_probability_)) {
+    op.kind = Op::Kind::kReopen;
     return op;
   }
   // Put 35%, Delete 15%, WriteBatch 10%, Get 30%, Seek 10%.
@@ -228,7 +237,21 @@ void ApplyToModel(Model& model, const Mutation& mutation) {
 
 }  // namespace
 
-std::optional<std::string> Apply(DB& db, Model& model, const Op& op) {
+std::optional<std::string> Apply(std::unique_ptr<DB>& db_ref, const DbSetup& setup, Model& model,
+                                 const Op& op) {
+  if (op.kind == Op::Kind::kReopen) {
+    if (!setup.reopen) {
+      return std::string("Reopen() but the DbSetup has no reopen function");
+    }
+    db_ref.reset();  // closes the database (and releases its LOCK)
+    Result<std::unique_ptr<DB>> reopened = setup.reopen();
+    if (!reopened.ok()) {
+      return "Reopen() failed: " + reopened.status().ToString();
+    }
+    db_ref = std::move(reopened).value();
+    return std::nullopt;  // whether recovery kept everything shows in later reads
+  }
+  DB& db = *db_ref;
   switch (op.kind) {
     case Op::Kind::kPut: {
       const Mutation& put = op.mutations.front();
@@ -280,18 +303,22 @@ std::optional<std::string> Apply(DB& db, Model& model, const Op& op) {
       return CompareRange(*it, model.lower_bound(op.key), model.cend(), op.next_count + 1,
                           Describe(op));
     }
+    case Op::Kind::kReopen:
+      break;  // handled above
   }
   return "unknown operation kind";
 }
 
-std::optional<Failure> Replay(const DbFactory& factory, std::span<const Op> ops) {
-  Result<std::unique_ptr<DB>> db = factory();
-  if (!db.ok()) {
-    return Failure{.op_index = 0, .message = "opening the DB failed: " + db.status().ToString()};
+std::optional<Failure> Replay(const DbSetup& setup, std::span<const Op> ops) {
+  Result<std::unique_ptr<DB>> opened = setup.open();
+  if (!opened.ok()) {
+    return Failure{.op_index = 0,
+                   .message = "opening the DB failed: " + opened.status().ToString()};
   }
+  std::unique_ptr<DB> db = std::move(opened).value();
   Model model;
   for (std::size_t i = 0; i < ops.size(); ++i) {
-    if (std::optional<std::string> problem = Apply(**db, model, ops[i])) {
+    if (std::optional<std::string> problem = Apply(db, setup, model, ops[i])) {
       return Failure{.op_index = i, .message = std::move(*problem)};
     }
   }
@@ -304,8 +331,8 @@ namespace {
 
 class Shrinker {
  public:
-  Shrinker(const DbFactory& factory, const ShrinkLimits& limits)
-      : factory_(&factory), limits_(limits), start_(std::chrono::steady_clock::now()) {}
+  Shrinker(const DbSetup& setup, const ShrinkLimits& limits)
+      : setup_(&setup), limits_(limits), start_(std::chrono::steady_clock::now()) {}
 
   // Replays `candidate`; if it fails, cuts it off just after the failing
   // operation, makes it the current best, and returns true.
@@ -314,7 +341,7 @@ class Shrinker {
       return false;
     }
     ++result_.replays;
-    std::optional<Failure> failure = Replay(*factory_, candidate);
+    std::optional<Failure> failure = Replay(*setup_, candidate);
     if (!failure) {
       return false;
     }
@@ -335,7 +362,7 @@ class Shrinker {
   ShrinkResult& Best() { return result_; }
 
  private:
-  const DbFactory* factory_;
+  const DbSetup* setup_;
   ShrinkLimits limits_;
   std::chrono::steady_clock::time_point start_;
   ShrinkResult result_;
@@ -356,8 +383,8 @@ std::vector<Op> Without(const std::vector<Op>& ops, std::size_t begin, std::size
 
 }  // namespace
 
-ShrinkResult Shrink(const DbFactory& factory, std::vector<Op> failing, const ShrinkLimits& limits) {
-  Shrinker shrinker(factory, limits);
+ShrinkResult Shrink(const DbSetup& setup, std::vector<Op> failing, const ShrinkLimits& limits) {
+  Shrinker shrinker(setup, limits);
   if (!shrinker.TryAdopt(std::move(failing))) {
     // Not reproducible (or no budget): report what we were given.
     return std::move(shrinker.Best());
@@ -365,16 +392,17 @@ ShrinkResult Shrink(const DbFactory& factory, std::vector<Op> failing, const Shr
   ShrinkResult& best = shrinker.Best();
 
   // 1. Reads before the failing operation change nothing; drop them all.
+  //    (Writes and reopens are kept here; ddmin below tries removing them.)
   {
-    std::vector<Op> writes;
+    std::vector<Op> kept;
     for (std::size_t i = 0; i + 1 < best.ops.size(); ++i) {
-      if (best.ops[i].IsWrite()) {
-        writes.push_back(best.ops[i]);
+      if (best.ops[i].ChangesState()) {
+        kept.push_back(best.ops[i]);
       }
     }
-    writes.push_back(best.ops.back());
-    if (writes.size() < best.ops.size()) {
-      static_cast<void>(shrinker.TryAdopt(std::move(writes)));
+    kept.push_back(best.ops.back());
+    if (kept.size() < best.ops.size()) {
+      static_cast<void>(shrinker.TryAdopt(std::move(kept)));
     }
   }
 
@@ -416,17 +444,18 @@ ShrinkResult Shrink(const DbFactory& factory, std::vector<Op> failing, const Shr
 
 // --- Running ----------------------------------------------------------------------------
 
-std::string RunModelTest(const DbFactory& factory, const RunOptions& options) {
+std::string RunModelTest(const DbSetup& setup, const RunOptions& options) {
   std::optional<Failure> failure;
   {
-    Result<std::unique_ptr<DB>> db = factory();
-    if (!db.ok()) {
-      return "opening the DB failed: " + db.status().ToString();
+    Result<std::unique_ptr<DB>> opened = setup.open();
+    if (!opened.ok()) {
+      return "opening the DB failed: " + opened.status().ToString();
     }
+    std::unique_ptr<DB> db = std::move(opened).value();
     OpGenerator generator(options.seed, options.operations, options.generator);
     Model model;
     for (std::size_t i = 0; i < options.operations && !failure; ++i) {
-      if (std::optional<std::string> problem = Apply(**db, model, generator.Next())) {
+      if (std::optional<std::string> problem = Apply(db, setup, model, generator.Next())) {
         failure = Failure{.op_index = i, .message = std::move(*problem)};
       }
     }
@@ -444,7 +473,7 @@ std::string RunModelTest(const DbFactory& factory, const RunOptions& options) {
     ops.push_back(generator.Next());
   }
   const std::size_t original_length = ops.size();
-  const ShrinkResult shrunk = Shrink(factory, std::move(ops), options.shrink);
+  const ShrinkResult shrunk = Shrink(setup, std::move(ops), options.shrink);
 
   std::string report = "Model test failed: seed " + std::to_string(options.seed) + ", operation " +
                        std::to_string(failure->op_index) + " of " +

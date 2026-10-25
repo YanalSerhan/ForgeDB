@@ -1,5 +1,7 @@
-// Phase 1 exit gate: the memory-only DB agrees with std::map over 1,000,000
-// random operations, for several seeds.
+// Phase 1 exit gate: the DB agrees with std::map over 1,000,000 random
+// operations, for several seeds. Since Phase 2.3 the runs also close and
+// reopen the database (about five times per run), so recovery from the log
+// is checked against the model too.
 //
 // The operation count is a build-time default (FORGEDB_MODEL_TEST_OPERATIONS,
 // set in tests/CMakeLists.txt): 1,000,000 in optimized builds, 100,000 in
@@ -61,14 +63,20 @@ std::vector<std::uint64_t> Seeds() {
 class MemoryDBModelTest : public testing::TestWithParam<std::uint64_t> {};
 
 TEST_P(MemoryDBModelTest, AgreesWithStdMap) {
-  // Each replay gets a new database on its own in-memory file system.
-  const auto open = [] {
-    return OpenDB(Options{}, "model-test", std::make_shared<MemFileSystem>());
-  };
+  // Each run (and each replay while shrinking) starts on a new in-memory file
+  // system; a reopen opens the same one again.
+  const auto storage = std::make_shared<std::shared_ptr<MemFileSystem>>();
+  const DbSetup setup(
+      [storage] {
+        *storage = std::make_shared<MemFileSystem>();
+        return OpenDB(Options{}, "model-test", *storage);
+      },
+      [storage] { return OpenDB(Options{}, "model-test", *storage); });
   RunOptions options;
   options.seed = GetParam();
   options.operations = OperationsPerSeed();
-  EXPECT_EQ(RunModelTest(open, options), "");
+  options.generator.expected_reopens = 5;
+  EXPECT_EQ(RunModelTest(setup, options), "");
 }
 
 INSTANTIATE_TEST_SUITE_P(Seeds, MemoryDBModelTest, testing::ValuesIn(Seeds()));

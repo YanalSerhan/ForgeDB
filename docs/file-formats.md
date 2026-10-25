@@ -10,6 +10,32 @@ Rules that apply to every format:
 - **Checksums.** Every on-disk structure carries a CRC-32C (below). Stored checksums are *masked*.
 - **Endianness.** All multi-byte integers are little-endian.
 
+## Database directory
+
+Code: `src/db/filename.*`, `OpenDB` in `src/db/db_impl.cpp`. Tests: `tests/unit/filename_test.cpp`,
+`tests/unit/db_recovery_test.cpp`.
+
+| Name | What it is | Since |
+|---|---|---|
+| `000005.log` | write-ahead log number 5 (see "Write-ahead log") | 2.2 |
+| `000007.sst` | table file number 7 | Phase 3 |
+| `MANIFEST-000003` | descriptor number 3 | Phase 3.6 |
+| `CURRENT` | names the current MANIFEST | Phase 3.6 |
+| `LOCK` | empty; locked (`LockFileEx`, exclusive) while the database is open | 2.3 |
+
+- File numbers are decimal with at least six digits (`000005`); from 1,000,000 on the name has
+  more digits and no leading zero. All file types share one number counter (from Phase 3).
+- Names in the directory are untrusted. Only these exact spellings are database files; anything
+  else (`5.log`, `0000005.log`, `000005.LOG`, a number above 2^64 - 1, other files) is ignored and
+  never modified or deleted.
+- **Open (Phase 2).** Lock `LOCK` (if it is held: `Busy`), then replay every `.log` file in
+  increasing number order. Sequence numbers must be contiguous: the first record starts at 1 and
+  every later record, in the same log or the next, starts at the previous record's sequence plus
+  its count (an empty batch uses no numbers); otherwise the open fails with `Corruption`.
+  A torn tail is ignored (each log is read on its own: a torn tail ends that log, not the replay);
+  mid-log damage fails the open. New writes go to a new log numbered one above the highest
+  existing log, so a torn tail is never appended to. Logs are not deleted before Phase 3.
+
 ## Primitive encodings
 
 Code: `src/util/coding.h`, `src/util/coding.cpp`. Tests: `tests/unit/coding_test.cpp`.
@@ -148,7 +174,7 @@ Any violation is a `Corruption` status saying what was wrong and at which byte o
 Code: `src/log/log_format.h`, `src/log/log_writer.*`, `src/log/log_reader.*`. Tests:
 `tests/unit/log_test.cpp`.
 
-Every write batch is appended to the current log file (`NNNNNN.log`, Phase 2.3) as one *record*
+Every write batch is appended to the current log file (`NNNNNN.log`; see "Database directory") as one *record*
 before it is applied to the memtable; recovery replays the records in order. The record's payload
 is the batch's bytes (see "Write batch").
 

@@ -23,6 +23,7 @@
 #include "forgedb/write_batch.h"
 
 #include "db/db_impl.h"
+#include "db/filename.h"
 #include "db/write_batch_internal.h"
 #include "env/file_system.h"
 #include "env/mem_file_system.h"
@@ -165,8 +166,7 @@ class Recorder final : public WriteBatch::Handler {
 
 // Every record in the database's log. The DB must not be writing.
 std::vector<LoggedBatch> ReadLog(FileSystem& fs) {
-  log::Reader reader(
-      std::move(fs.NewSequentialFile(std::filesystem::path("db") / kLogFileName)).value());
+  log::Reader reader(std::move(fs.NewSequentialFile(LogFileName("db", 1))).value());
   std::vector<LoggedBatch> batches;
   while (true) {
     const Result<std::optional<std::string_view>> record = reader.ReadRecord();

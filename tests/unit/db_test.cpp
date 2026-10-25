@@ -21,6 +21,7 @@
 
 #include "db/db_impl.h"
 #include "db/db_iter.h"
+#include "db/filename.h"
 #include "db/internal_key.h"
 #include "db/write_batch_internal.h"
 #include "env/mem_file_system.h"
@@ -67,27 +68,13 @@ TEST(DBTest, OpenRejectsAnEmptyName) {
   EXPECT_EQ(db.status().code(), Status::Code::kInvalidArgument);
 }
 
-TEST(DBTest, OpenCreatesTheDirectoryAndALog) {
+TEST(DBTest, OpenCreatesTheDirectoryALogAndALock) {
   const auto fs = std::make_shared<MemFileSystem>();
   ASSERT_TRUE(fs->CreateDir("parent").ok());
   const Result<std::unique_ptr<DB>> db = OpenDB(Options{}, "parent/db", fs);
   ASSERT_TRUE(db.ok()) << db.status().ToString();
-  EXPECT_TRUE(fs->FileExists(std::filesystem::path("parent/db") / kLogFileName).value());
-}
-
-// Until recovery exists (Phase 2.3), reopening must not truncate the log.
-TEST(DBTest, ReopeningAnExistingDatabaseIsRefused) {
-  const auto fs = std::make_shared<MemFileSystem>();
-  {
-    const Result<std::unique_ptr<DB>> db = OpenDB(Options{}, "db", fs);
-    ASSERT_TRUE(db.ok());
-    ASSERT_TRUE((*db)->Put({}, "k", "v").ok());
-  }
-  const std::uint64_t log_size =
-      fs->GetFileSize(std::filesystem::path("db") / kLogFileName).value();
-  const Result<std::unique_ptr<DB>> again = OpenDB(Options{}, "db", fs);
-  EXPECT_EQ(again.status().code(), Status::Code::kNotSupported) << again.status().ToString();
-  EXPECT_EQ(fs->GetFileSize(std::filesystem::path("db") / kLogFileName).value(), log_size);
+  EXPECT_TRUE(fs->FileExists(LogFileName("parent/db", 1)).value());
+  EXPECT_TRUE(fs->FileExists(LockFileName("parent/db")).value());
 }
 
 TEST(DBTest, NewDatabaseIsEmpty) {

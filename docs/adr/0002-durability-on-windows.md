@@ -1,8 +1,8 @@
 # ADR 0002: Durability rules on Windows
 
-- **Status:** Proposed. Rules 1-11 are implemented in `src/env/` (Phase 0.4). The open question
-  at the end needs a decision before Phase 3. This ADR is the Phase 0 exit-gate item "reviewed line
-  by line".
+- **Status:** Proposed. Rules 1-10 and 12 are implemented in `src/env/` (Phase 0.4); rule 11, an
+  assumption, was added in Phase 2.4. The open question at the end needs a decision before
+  Phase 3. This ADR is the Phase 0 exit-gate item "reviewed line by line".
 - **Date:** 2026-10-23
 
 ## Context
@@ -134,7 +134,12 @@ Rules, each implemented in `src/env/win_file_system.cpp` unless noted.
     first error from every later call, and the database refuses further writes (Phase 2.2). The
     documentation doesn't say what is on disk after `FlushFileBuffers` fails, so the only safe
     assumption is "unknown."
-11. **Positional reads** pass their offset in an `OVERLAPPED` structure, so concurrent readers
+11. **Directories are assumed durable once created.** No documentation says when a new
+    directory's entry reaches the disk, and there is no documented way to flush it (F7). ForgeDB
+    creates a database directory once and never removes it; a crash right after creation could, in
+    principle, lose it with everything inside. *Assumption, not a documented guarantee*; the
+    fault-injection model (Phase 2.4) makes the same assumption.
+12. **Positional reads** pass their offset in an `OVERLAPPED` structure, so concurrent readers
     don't share a file position; `ERROR_HANDLE_EOF` means "0 bytes" (F11). Windows serializes
     synchronous I/O on one handle, so these reads are correct but not parallel; revisit in Phase 5
     if profiling shows contention.
@@ -185,8 +190,13 @@ correctness argument that uses only documented behavior. The fault-injection fil
   (`tests/unit/file_system_conformance_test.cpp`); Windows-specific behavior (retry, UTF-8 errors,
   handle ownership) is tested in `tests/unit/win_file_system_test.cpp`.
 - **Not provable by tests on real hardware:** power-loss durability. It rests on F1-F4 and is
-  exercised by the fault-injection model (Phase 2.4); the process-kill test (Phase 2.6) covers
-  process crashes only.
+  exercised by the fault-injection model (Phase 2.4, `tests/support/fault_injection_file_system.h`);
+  the process-kill test (Phase 2.6) covers process crashes only.
+- **The fault-injection model trusts only these rules.** After a simulated power loss, synced
+  bytes survive (F2, F3); a name survives once its file was synced under it (rule 3); a rename or
+  a removal may be undone, unless the `durable_renames` / `durable_removals` options say otherwise
+  (F5, F7); directories survive (rule 11). The open question below can therefore be tested both
+  ways: option A with `durable_renames = true`, option B with the default.
 - **Limitations** (also in `TODO.md`, "Known limitations"):
   - Durability depends on the drive honoring flush requests; the write-cache setting in F4 voids it.
   - File systems without POSIX delete (FAT32, some network shares) get classic delete-on-close:

@@ -8,8 +8,9 @@
 // them (drops reads, then delta-debugging over the writes, then individual
 // operations inside batches) as long as the shorter sequence still fails.
 //
-//   const std::string report = model::RunModelTest(factory, {.seed = 7, .operations = 100000});
-//   EXPECT_EQ(report, "");  // empty means the DB agreed with the model throughout
+//   model::RunOptions options;
+//   options.seed = 7;
+//   EXPECT_EQ(model::RunModelTest(model::DbSetup(open), options), "");  // "" = agreed throughout
 #pragma once
 
 #include <chrono>
@@ -23,6 +24,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "forgedb/db.h"
@@ -46,14 +48,18 @@ struct Op {
     kGet,         // DB::Get(key)
     kScan,        // a full scan with a new iterator
     kSeek,        // a new iterator, Seek(key), then next_count x Next
+    kReopen,      // close the DB and open it again on the same storage
   };
   Kind kind = Kind::kGet;
   std::vector<Mutation> mutations;
   std::string key;
   std::size_t next_count = 0;
 
-  [[nodiscard]] bool IsWrite() const noexcept {
-    return kind == Kind::kPut || kind == Kind::kDelete || kind == Kind::kWriteBatch;
+  // Whether the operation can change what later reads see (a write, or a
+  // reopen, which can lose data if recovery is wrong). Shrinking keeps these.
+  [[nodiscard]] bool ChangesState() const noexcept {
+    return kind == Kind::kPut || kind == Kind::kDelete || kind == Kind::kWriteBatch ||
+           kind == Kind::kReopen;
   }
 };
 
@@ -77,6 +83,9 @@ struct GeneratorOptions {
   // A full scan costs O(DB size), so scans are rationed per run instead of
   // being a fixed share of operations.
   std::size_t expected_scans = 20;
+  // Reopens per run (each replays the whole log, so they are rationed too).
+  // 0 means none; set it only for a DbSetup with a reopen function.
+  std::size_t expected_reopens = 0;
 };
 
 // A deterministic stream of operations: the same seed, operation count and
@@ -95,6 +104,7 @@ class OpGenerator {
 
   GeneratorOptions options_;
   double scan_probability_;
+  double reopen_probability_;
   std::mt19937_64 rng_;
   std::uint64_t counter_ = 0;              // numbers values, so reproductions are readable
   std::vector<std::string> recent_large_;  // so large keys get read and deleted too
@@ -102,21 +112,32 @@ class OpGenerator {
 };
 
 using Model = std::map<std::string, std::string>;
-using DbFactory = std::function<Result<std::unique_ptr<DB>>()>;
+using DbOpener = std::function<Result<std::unique_ptr<DB>>()>;
 
-// Applies `op` to both `db` and `model`. For reads, compares the DB's answer
-// with the model's. Returns a description of the problem: a mismatch, or a
-// DB call that returned an error.
-[[nodiscard]] std::optional<std::string> Apply(DB& db, Model& model, const Op& op);
+// How the harness gets databases. `open` starts over on empty storage (every
+// run and every replay calls it first); `reopen`, if set, opens the storage
+// the last `open` created again. The harness destroys the old DB first.
+struct DbSetup {
+  explicit DbSetup(DbOpener open_function, DbOpener reopen_function = nullptr)
+      : open(std::move(open_function)), reopen(std::move(reopen_function)) {}
+  DbOpener open;
+  DbOpener reopen;
+};
+
+// Applies `op` to both `db` and `model` (a kReopen replaces `db`). For reads,
+// compares the DB's answer with the model's. Returns a description of the
+// problem: a mismatch, or a DB call that returned an error.
+[[nodiscard]] std::optional<std::string> Apply(std::unique_ptr<DB>& db, const DbSetup& setup,
+                                               Model& model, const Op& op);
 
 struct Failure {
   std::size_t op_index = 0;
   std::string message;
 };
 
-// Runs `ops` from the start on a new DB from `factory` and a new model.
+// Runs `ops` from the start on a new DB from setup.open and a new model.
 // The first failure, if any.
-[[nodiscard]] std::optional<Failure> Replay(const DbFactory& factory, std::span<const Op> ops);
+[[nodiscard]] std::optional<Failure> Replay(const DbSetup& setup, std::span<const Op> ops);
 
 struct ShrinkLimits {
   std::size_t max_replays = 2000;
@@ -131,7 +152,7 @@ struct ShrinkResult {
 };
 
 // Shrinks `failing` (whose replay fails) to a short sequence that still fails.
-[[nodiscard]] ShrinkResult Shrink(const DbFactory& factory, std::vector<Op> failing,
+[[nodiscard]] ShrinkResult Shrink(const DbSetup& setup, std::vector<Op> failing,
                                   const ShrinkLimits& limits = {});
 
 struct RunOptions {
@@ -144,6 +165,6 @@ struct RunOptions {
 // Runs a model test. Returns "" if the DB agreed with the model on every
 // read; otherwise a report with the seed, the failing operation and a
 // minimal reproduction.
-[[nodiscard]] std::string RunModelTest(const DbFactory& factory, const RunOptions& options);
+[[nodiscard]] std::string RunModelTest(const DbSetup& setup, const RunOptions& options);
 
 }  // namespace forgedb::model

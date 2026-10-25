@@ -1,6 +1,16 @@
 find_package(GTest CONFIG REQUIRED)
 include(GoogleTest)
 
+# Test-only helpers shared by the test executables: the fault-injection file
+# system (TODO 2.4). Not part of the engine.
+add_library(forgedb_test_support STATIC
+  support/fault_injection_file_system.cpp
+)
+target_link_libraries(forgedb_test_support PUBLIC forgedb::forgedb)
+target_include_directories(forgedb_test_support PUBLIC
+  "${PROJECT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}")
+forgedb_target_defaults(forgedb_test_support)
+
 # One executable for all unit tests; model, crash, corruption and stress
 # suites get their own executables in later phases.
 add_executable(forgedb_unit_tests
@@ -8,8 +18,11 @@ add_executable(forgedb_unit_tests
   unit/check_test.cpp
   unit/coding_test.cpp
   unit/crc32c_test.cpp
+  unit/db_recovery_test.cpp
   unit/db_test.cpp
   unit/db_write_test.cpp
+  unit/fault_injection_file_system_test.cpp
+  unit/filename_test.cpp
   unit/file_system_conformance_test.cpp
   unit/internal_key_test.cpp
   unit/log_test.cpp
@@ -21,7 +34,8 @@ add_executable(forgedb_unit_tests
   unit/win_file_system_test.cpp
   unit/write_batch_test.cpp
 )
-target_link_libraries(forgedb_unit_tests PRIVATE forgedb::forgedb GTest::gtest_main)
+target_link_libraries(forgedb_unit_tests PRIVATE
+  forgedb::forgedb forgedb_test_support GTest::gtest_main)
 # Unit tests exercise internal classes, so they see src/ like the library does.
 target_include_directories(forgedb_unit_tests PRIVATE "${PROJECT_SOURCE_DIR}/src")
 forgedb_target_defaults(forgedb_unit_tests)

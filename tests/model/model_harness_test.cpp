@@ -5,11 +5,16 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <filesystem>
+#include <functional>
 
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -19,6 +24,7 @@
 #include "forgedb/write_batch.h"
 
 #include "db/db_impl.h"
+#include "db/filename.h"
 #include "env/mem_file_system.h"
 
 namespace forgedb::model {
@@ -29,11 +35,72 @@ Result<std::unique_ptr<DB>> OpenMemoryDB() {
   return OpenDB(Options{}, "model-test", std::make_shared<MemFileSystem>());
 }
 
-RunOptions SeedAndOps(std::uint64_t seed, std::size_t operations) {
+RunOptions SeedAndOps(std::uint64_t seed, std::size_t operations,
+                      std::size_t expected_reopens = 0) {
   RunOptions options;
   options.seed = seed;
   options.operations = operations;
+  options.generator.expected_reopens = expected_reopens;
   return options;
+}
+
+constexpr std::string_view kDbName = "model-test";
+
+// A DbSetup on in-memory storage that `reopen` opens again. `before_reopen`,
+// if set, runs on the storage between the close and the open, and
+// `reopen_count`, if set, counts the reopens.
+DbSetup ReopenableMemoryDB(std::function<void(MemFileSystem&)> before_reopen = nullptr,
+                           std::size_t* reopen_count = nullptr) {
+  const auto storage = std::make_shared<std::shared_ptr<MemFileSystem>>();
+  return DbSetup(
+      [storage] {
+        *storage = std::make_shared<MemFileSystem>();  // fresh storage for every run/replay
+        return OpenDB(Options{}, std::filesystem::path(kDbName), *storage);
+      },
+      [storage, before_reopen = std::move(before_reopen), reopen_count] {
+        if (before_reopen) {
+          before_reopen(**storage);
+        }
+        if (reopen_count != nullptr) {
+          ++*reopen_count;
+        }
+        return OpenDB(Options{}, std::filesystem::path(kDbName), *storage);
+      });
+}
+
+// A planted recovery bug: the newest log loses its last byte at every reopen,
+// so its last record is torn and recovery (correctly) drops it. A closed
+// database must keep every write, so the harness must notice.
+void DropTheLastByteOfTheNewestLog(MemFileSystem& fs) {
+  const std::filesystem::path db(kDbName);
+  std::optional<std::uint64_t> newest;
+  for (const std::string& name : std::move(fs.GetChildren(db)).value()) {
+    const std::optional<ParsedFileName> parsed = ParseFileName(name);
+    if (parsed && parsed->type == FileType::kLog && (!newest || parsed->number > *newest)) {
+      newest = parsed->number;
+    }
+  }
+  if (!newest) {
+    return;
+  }
+  const std::filesystem::path path = LogFileName(db, *newest);
+  std::string contents;
+  {
+    const std::unique_ptr<SequentialFile> file = std::move(fs.NewSequentialFile(path)).value();
+    std::string buffer(4096, '\0');
+    std::size_t read = 0;
+    while ((read = std::move(file->Read(std::span<char>(buffer))).value()) > 0) {
+      contents.append(buffer, 0, read);
+    }
+  }
+  if (contents.empty()) {
+    return;
+  }
+  contents.pop_back();
+  const std::unique_ptr<WritableFile> file = std::move(fs.NewWritableFile(path)).value();
+  if (!file->Append(contents).ok() || !file->Close().ok()) {
+    std::abort();  // MemFileSystem does not fail these
+  }
 }
 
 // A DB with a planted bug: any deletion of `ignored_key` is silently dropped.
@@ -116,10 +183,23 @@ TEST(ModelHarnessTest, GeneratorCoversEveryOperationAndReusesKeys) {
     }
   }
   EXPECT_EQ(kinds.size(), 6U) << "Put, Delete, WriteBatch, Get, Scan and Seek all appear";
+  EXPECT_FALSE(kinds.contains(Op::Kind::kReopen)) << "no reopens unless asked for";
   EXPECT_GT(empty_batches, 0U);
   EXPECT_TRUE(empty_key);
   EXPECT_GT(writes_to_small_keys, 5000U) << "most writes hit the small key set: overwrites";
   EXPECT_GT(non_ascii_keys, 0U);
+}
+
+TEST(ModelHarnessTest, GeneratorReopensAboutAsOftenAsAsked) {
+  GeneratorOptions options;
+  options.expected_reopens = 40;
+  OpGenerator generator(3, 20000, options);
+  std::size_t reopens = 0;
+  for (int i = 0; i < 20000; ++i) {
+    reopens += generator.Next().kind == Op::Kind::kReopen ? 1U : 0U;
+  }
+  EXPECT_GE(reopens, 20U);
+  EXPECT_LE(reopens, 60U);
 }
 
 TEST(ModelHarnessTest, QuoteEscapesBytes) {
@@ -132,11 +212,30 @@ TEST(ModelHarnessTest, QuoteEscapesBytes) {
 }
 
 TEST(ModelHarnessTest, AgreesWithACorrectDB) {
-  EXPECT_EQ(RunModelTest(OpenMemoryDB, SeedAndOps(5, 20000)), "");
+  EXPECT_EQ(RunModelTest(DbSetup(OpenMemoryDB), SeedAndOps(5, 20000)), "");
+}
+
+TEST(ModelHarnessTest, AgreesWithACorrectDBAcrossReopens) {
+  std::size_t reopens = 0;
+  EXPECT_EQ(RunModelTest(ReopenableMemoryDB(nullptr, &reopens), SeedAndOps(5, 20000, 40)), "");
+  EXPECT_GE(reopens, 20U) << "the run did reopen";
+}
+
+TEST(ModelHarnessTest, AReopenWithoutAReopenFunctionIsReported) {
+  Op reopen;
+  reopen.kind = Op::Kind::kReopen;
+  EXPECT_EQ(Describe(reopen), "Reopen()");
+  const std::vector<Op> ops = {reopen};
+  const std::optional<Failure> failure = Replay(DbSetup(OpenMemoryDB), ops);
+  if (!failure.has_value()) {
+    FAIL() << "a reopen needs a reopen function";
+  }
+  EXPECT_EQ(failure->op_index, 0U);
+  EXPECT_NE(failure->message.find("no reopen function"), std::string::npos) << failure->message;
 }
 
 TEST(ModelHarnessTest, CatchesABugAndShrinksItToAMinimalReproduction) {
-  const std::string report = RunModelTest(OpenBuggyDB, SeedAndOps(5, 20000));
+  const std::string report = RunModelTest(DbSetup(OpenBuggyDB), SeedAndOps(5, 20000));
   ASSERT_NE(report, "") << "the planted bug must be found";
   SCOPED_TRACE(report);
   EXPECT_NE(report.find("seed 5"), std::string::npos);
@@ -154,36 +253,55 @@ TEST(ModelHarnessTest, CatchesABugAndShrinksItToAMinimalReproduction) {
   EXPECT_NE(report.find("k07", start), std::string::npos);
 }
 
+TEST(ModelHarnessTest, CatchesWritesLostByAReopenAndShrinksThem) {
+  const std::string report =
+      RunModelTest(ReopenableMemoryDB(DropTheLastByteOfTheNewestLog), SeedAndOps(5, 20000, 40));
+  ASSERT_NE(report, "") << "the lost write must be found";
+  SCOPED_TRACE(report);
+  EXPECT_EQ(report.find("may not be minimal"), std::string::npos);
+
+  // The shortest failure is: write, reopen (the write is lost), read it.
+  const std::size_t start = report.find("Minimal reproduction (");
+  ASSERT_NE(start, std::string::npos);
+  const std::size_t count =
+      std::stoul(report.substr(start + std::string("Minimal reproduction (").size()));
+  EXPECT_GE(count, 3U);
+  EXPECT_LE(count, 4U);
+  EXPECT_NE(report.find("Reopen()", start), std::string::npos);
+}
+
 TEST(ModelHarnessTest, ShrinkResultStillFailsAndIsOneMinimal) {
   // Find a failing prefix directly, then check Shrink's two promises.
   OpGenerator generator(9, 20000);
   std::vector<Op> ops;
   std::optional<Failure> failure;
+  const DbSetup buggy(OpenBuggyDB);
   {
-    const std::unique_ptr<DB> db = std::move(OpenBuggyDB()).value();
+    std::unique_ptr<DB> db = std::move(OpenBuggyDB()).value();
     Model model;
     while (!failure && ops.size() < 20000) {
       ops.push_back(generator.Next());
-      if (std::optional<std::string> problem = Apply(*db, model, ops.back())) {
+      if (std::optional<std::string> problem = Apply(db, buggy, model, ops.back())) {
         failure = Failure{.op_index = ops.size() - 1, .message = *problem};
       }
     }
   }
   ASSERT_TRUE(failure.has_value());
 
-  const ShrinkResult shrunk = Shrink(OpenBuggyDB, ops);
+  const ShrinkResult shrunk = Shrink(buggy, ops);
   ASSERT_FALSE(shrunk.ops.empty());
   EXPECT_FALSE(shrunk.stopped_early);
-  const std::optional<Failure> replayed = Replay(OpenBuggyDB, shrunk.ops);
+  const std::optional<Failure> replayed = Replay(buggy, shrunk.ops);
   if (!replayed.has_value()) {
     FAIL() << "the reproduction must still fail";
   }
   EXPECT_EQ(replayed->op_index, shrunk.ops.size() - 1) << "at its last operation";
-  EXPECT_FALSE(Replay(OpenMemoryDB, shrunk.ops).has_value()) << "and a correct DB passes it";
+  EXPECT_FALSE(Replay(DbSetup(OpenMemoryDB), shrunk.ops).has_value())
+      << "and a correct DB passes it";
   for (std::size_t i = 0; i + 1 < shrunk.ops.size(); ++i) {  // 1-minimal
     std::vector<Op> without = shrunk.ops;
     without.erase(without.begin() + static_cast<std::ptrdiff_t>(i));
-    EXPECT_FALSE(Replay(OpenBuggyDB, without).has_value()) << "operation " << i << " is needed";
+    EXPECT_FALSE(Replay(buggy, without).has_value()) << "operation " << i << " is needed";
   }
 }
 

@@ -146,38 +146,41 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 
 ## Phase 2 — Write-ahead log and recovery (≈2 weeks)
 
-> `[~]` items in 2.1-2.2: tests pass on Linux (gcc ASan+UBSan; gcc ThreadSanitizer for the write path; clang near `-Weverything`) and in the Windows build under Wine. 2.1 passed every Windows preset except a clang-tidy fix in its test, not yet re-run; 2.2 is waiting for the MSVC/clang-cl run.
-
 ### 2.1 Log format
-- [~] 32 KiB blocks; record header = CRC32C (4) + length (2) + type (1); types FULL, FIRST, MIDDLE, LAST for records spanning blocks
-- [~] Block tail too small for a header is zero-padded
-- [~] Document the byte layout in `docs/file-formats.md`
-- [~] `log::Writer` (appends records) and `log::Reader` (reassembles records, reports corruption with offset and reason)
-- [~] Reader distinguishes a **torn tail** (incomplete last record → ignore) from **mid-log corruption** (→ error): torn tail iff no valid fragment follows the damage; mid-log corruption fails recovery (strict policy, chosen in 2.1)
-- [~] Unit tests: records of every size class, block boundaries, empty records, truncated tail, flipped bits
+- [x] 32 KiB blocks; record header = CRC32C (4) + length (2) + type (1); types FULL, FIRST, MIDDLE, LAST for records spanning blocks
+- [x] Block tail too small for a header is zero-padded
+- [x] Document the byte layout in `docs/file-formats.md`
+- [x] `log::Writer` (appends records) and `log::Reader` (reassembles records, reports corruption with offset and reason)
+- [x] Reader distinguishes a **torn tail** (incomplete last record → ignore) from **mid-log corruption** (→ error): torn tail iff no valid fragment follows the damage; mid-log corruption fails recovery (strict policy, chosen in 2.1)
+- [x] Unit tests: records of every size class, block boundaries, empty records, truncated tail, flipped bits
 
 ### 2.2 Write path with group commit
-- [~] Writer queue: `std::mutex` + `std::condition_variable`; the first waiting writer becomes leader
-- [~] Leader merges followers' batches (up to a size cap), assigns sequence numbers, appends **one** log record, calls `Sync` once if any writer asked for `sync = true` (cap: 1 MiB, or leader's batch + 128 KiB when it is small)
-- [~] Apply merged batch to the memtable, then wake followers with their status
-- [~] Sticky background error: after a failed `Sync` or append, refuse all further writes (the log's state on disk is unknown)
-- [~] Unit test: many threads writing; every acknowledged write is visible; sequence numbers are unique and dense (checked by replaying the log)
-- [~] Microbenchmark: writes/sec with `sync = true`, 1 thread vs 8 threads (shows group commit's effect) (code done; numbers pending)
-- [~] `WriteOptions::sync`; DB writes `000001.log` in its directory; tests use `OpenDB(options, name, std::shared_ptr<FileSystem>)` (internal; decided in 2.2); reopening an existing DB is refused until 2.3
+- [x] Writer queue: `std::mutex` + `std::condition_variable`; the first waiting writer becomes leader
+- [x] Leader merges followers' batches (up to a size cap), assigns sequence numbers, appends **one** log record, calls `Sync` once if any writer asked for `sync = true` (cap: 1 MiB, or leader's batch + 128 KiB when it is small)
+- [x] Apply merged batch to the memtable, then wake followers with their status
+- [x] Sticky background error: after a failed `Sync` or append, refuse all further writes (the log's state on disk is unknown)
+- [x] Unit test: many threads writing; every acknowledged write is visible; sequence numbers are unique and dense (checked by replaying the log)
+- [x] Microbenchmark: writes/sec with `sync = true`, 1 thread vs 8 threads (shows group commit's effect): 1.93 k/s with 1 thread, 8.86 k/s with 8 (×4.6); `msvc-release`, i7-10750H laptop, one run; the drive's write-cache setting was not checked
+- [x] `WriteOptions::sync`; DB writes `000001.log` in its directory; tests use `OpenDB(options, name, std::shared_ptr<FileSystem>)` (internal; decided in 2.2); reopening an existing DB is refused until 2.3 (lifted in 2.3)
 
 ### 2.3 Open, lock and recovery
-- [ ] `LOCK` file locked with `LockFileEx` for the database's lifetime; second open fails with a clear error
-- [ ] File naming: `000005.log`, `000007.sst`, `MANIFEST-000003`, `CURRENT`, `LOCK`
-- [ ] Minimal metadata for this phase: record the current log number (full MANIFEST arrives in Phase 3)
-- [ ] Recovery: replay every log at or after the recorded log number, in order, into a fresh memtable; restore the last sequence number
-- [ ] New log file per memtable; memtable switch when `ApproximateMemoryUsage()` passes `memtable_bytes`
+- [x] `LOCK` file locked with `LockFileEx` (through `FileSystem::LockFile`) for the database's lifetime; a second open, by another process or another DB object, fails with `Busy` "database is already open"
+- [x] File naming: `000005.log`, `000007.sst`, `MANIFEST-000003`, `CURRENT`, `LOCK` (`src/db/filename.h`); the parser accepts only these exact names, anything else in the directory is left alone
+- [-] Minimal metadata for this phase: record the current log number — dropped (approved in 2.3): with logs never deleted and one memtable, a metadata file would only repeat what the directory listing says; Phase 3.6's MANIFEST records the log number
+- [x] Recovery: replay every log, in number order, into a fresh memtable; restore the last sequence number; sequence numbers must continue without gaps across records and logs (a gap is `Corruption`); torn tails are ignored, mid-log damage fails the open with the log's name (ADR 0004); the new log is numbered one above the highest
+- [-] New log file per memtable; memtable switch when `ApproximateMemoryUsage()` passes `memtable_bytes` — moved to 3.5 (approved in 2.3): a switch is only useful once there is somewhere to flush to. Phase 2 uses one memtable and one new log per open
+- [x] Model harness: `Reopen()` operation (close, then open the same storage); the model test reopens about five times per seed; a harness test plants a lost-write-on-reopen bug and checks it is caught and shrunk to 3 operations
+- Phase 2 limitation (until 3.5): all data stays in memory and logs are never deleted, so every open adds a log and replays all of them
 
 ### 2.4 Fault-injection file system
-- [ ] `FaultInjectionFileSystem` wraps any `FileSystem` and tracks, per file, how many bytes are synced
-- [ ] `SimulateCrash()`: truncate every file to its synced length; files never synced may vanish entirely
-- [ ] Options: keep a random part of the unsynced tail; corrupt the final partial write (torn write)
-- [ ] Error injection: fail the Nth `Append`, `Sync`, `RenameReplace` or `RemoveFile` with an I/O error
-- [ ] Its own unit tests (it must be trustworthy before it judges anything else)
+- [x] `FaultInjectionFileSystem` (`tests/support/`, test-only library `forgedb_test_support`) wraps any `FileSystem` and tracks, per file, the bytes written, flushed and synced, and per name which file a crash would leave
+- [x] `SimulateCrash(kPowerLoss)`: synced bytes survive exactly; a name survives once its file was synced under it (ADR 0002 rule 3); a name whose latest change was never synced comes back old or new, so files never synced may vanish entirely
+- [x] Options: drop the unsynced tail, keep a random part of it, or keep a random part with a torn end (garbage or zeros; the default); renames and removals not durable unless `durable_renames` / `durable_removals` (decided in 2.4: model only documented behavior)
+- [x] Error injection: fail the Nth call, or calls with a probability, of `NewWritableFile`, `Append` (optionally writing a partial prefix first), `Flush`, `Sync`, `Close`, `RenameReplace`, `RemoveFile`, `CreateDir`, `LockFile`; `WritableFile` errors stay sticky
+- [x] Its own unit tests (it must be trustworthy before it judges anything else): `tests/unit/fault_injection_file_system_test.cpp`, plus the `FileSystem` conformance suite run through it with no faults
+- [x] Added in 2.4 (approved): `SimulateCrash(kProcessCrash)` (flushed bytes, renames and removals survive; only unflushed bytes are lost); `CrashAtOperation(n)` (the process dies at the n-th change: that call and every later one fail and change nothing); handles and locks from before a crash are dead afterwards
+- [x] Added in 2.4 (approved): `zero_pages_in_unsynced_tail` option (pages written out of order); off by default, since ADR 0004 assumes in-order persistence. 2.5 runs with it and decides whether ADR 0004 needs a refinement
+- [x] ADR 0002 rule 11: directories are assumed durable once created (undocumented; the model assumes it too)
 
 ### 2.5 Crash torture test
 - [ ] Loop: open DB on the fault-injection FS, run random operations (random `sync` flags), crash at a random point, reopen, verify
@@ -187,6 +190,8 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
   - [ ] Recovery never fails on a torn tail
 - [ ] Error-injection variant: after an injected failure, the DB refuses writes and reopens cleanly
 - [ ] Iterations configurable; CI runs a short version, long runs locally
+- [ ] Run with `zero_pages_in_unsynced_tail` too; if recovery then fails on crashes it must survive, propose a refinement of ADR 0004 (decision from 2.4)
+- [ ] Renames and removals: once Phase 3.6 uses them, run with the default (not durable) and settle ADR 0002's open question
 
 ### 2.6 Process-kill test (real crash, Windows)
 - [ ] `tests/crash/crash_child.exe`: writes keys with `sync = true`, appends each acknowledged key to a side file
@@ -235,6 +240,7 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - [ ] Concurrency test: many threads hitting the cache; ASan clean
 
 ### 3.5 Flush to L0
+- [ ] Memtable switch when `ApproximateMemoryUsage()` passes `memtable_bytes`; a new log file per memtable (moved from 2.3)
 - [ ] Immutable memtable → `TableBuilder` → new `.sst` file → `Sync` → close
 - [ ] Old log deleted only after the new table is recorded in the MANIFEST and synced
 
@@ -243,7 +249,7 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - [ ] MANIFEST = a log file (same format as 2.1) of `VersionEdit` records
 - [ ] `CURRENT` update: write `MANIFEST-xxxxxx` name to a temp file → `Sync` → `RenameReplace` to `CURRENT`
 - [ ] `Version` (files per level) and `VersionSet` (current version, applies edits)
-- [ ] Recovery: read `CURRENT` → replay MANIFEST → replay logs newer than its log number
+- [ ] Recovery: read `CURRENT` → replay MANIFEST → replay logs newer than its log number (until then, 2.3 replays every log)
 - [ ] On open, delete files not referenced by the current version (leftovers from a crash)
 
 ### 3.7 Merged reads

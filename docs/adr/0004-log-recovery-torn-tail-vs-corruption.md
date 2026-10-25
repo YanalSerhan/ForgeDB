@@ -42,8 +42,11 @@ The reader cannot know where the last `Sync` ended, so it needs a rule that uses
 - No silent loss of synced data from mid-log damage: the user gets an error with an offset.
 - A false alarm is possible if a power failure persisted a later unsynced block but not an earlier
   one. Whether NTFS can do that for an append-only file is not documented by Microsoft; it is not
-  known to us. The crash-torture model (Phase 2.4/2.5) keeps a prefix of the unsynced data plus a
-  torn final write, so it does not produce this case.
+  known to us. The fault-injection file system (Phase 2.4) keeps a prefix of the unsynced data plus
+  a torn final write by default, so it does not produce this case; its
+  `zero_pages_in_unsynced_tail` option does (zeroed 4 KiB pages followed by surviving data). The
+  crash torture test (2.5) runs with that option to measure the effect and decide whether this
+  rule needs a refinement.
 - A torn record whose own payload contains bytes that form a valid fragment (e.g. a log file
   stored as a value) is reported as corruption: a false alarm, never a silent loss.
 - Tests: `tests/unit/log_test.cpp` (every truncation point, every single-bit flip, zero and garbage

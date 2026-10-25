@@ -1,8 +1,9 @@
 // The FileSystem contract, checked against every implementation.
 //
 // Each test runs once per implementation (typed tests). WinFileSystem works in
-// a fresh directory under %TEMP%; MemFileSystem in a fresh in-memory tree. A
-// behavior both must share belongs here; Windows-only details go in
+// a fresh directory under %TEMP%; MemFileSystem in a fresh in-memory tree; the
+// FaultInjectionFileSystem wraps a MemFileSystem, with no faults injected. A
+// behavior they all must share belongs here; Windows-only details go in
 // win_file_system_test.cpp.
 #include <algorithm>
 #include <atomic>
@@ -23,6 +24,7 @@
 #include "env/file_system.h"
 #include "env/mem_file_system.h"
 #include "env/win_file_system.h"
+#include "support/fault_injection_file_system.h"
 
 namespace forgedb {
 namespace {
@@ -48,6 +50,17 @@ struct MemFileSystemSetup {
   static constexpr const char* kName = "Mem";
   static std::unique_ptr<FileSystem> MakeFileSystem() { return std::make_unique<MemFileSystem>(); }
   static std::filesystem::path MakeRoot() { return "memroot"; }
+  static void RemoveRoot(const std::filesystem::path& /*root*/) {}
+};
+
+// With no faults injected, the fault-injection file system (TODO 2.4) must
+// behave exactly like the file system it wraps.
+struct FaultInjectionFileSystemSetup {
+  static constexpr const char* kName = "FaultInjection";
+  static std::unique_ptr<FileSystem> MakeFileSystem() {
+    return std::make_unique<FaultInjectionFileSystem>(std::make_shared<MemFileSystem>());
+  }
+  static std::filesystem::path MakeRoot() { return "faultroot"; }
   static void RemoveRoot(const std::filesystem::path& /*root*/) {}
 };
 
@@ -134,7 +147,8 @@ class SetupNames {
   }
 };
 
-using Implementations = ::testing::Types<WinFileSystemSetup, MemFileSystemSetup>;
+using Implementations =
+    ::testing::Types<WinFileSystemSetup, MemFileSystemSetup, FaultInjectionFileSystemSetup>;
 TYPED_TEST_SUITE(FileSystemConformanceTest, Implementations, SetupNames);
 
 // --- Writing and reading -----------------------------------------------------
