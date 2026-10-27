@@ -16,6 +16,8 @@ forgedb_target_defaults(forgedb_test_support)
 # suites get their own executables in later phases.
 add_executable(forgedb_unit_tests
   unit/arena_test.cpp
+  unit/block_test.cpp
+  unit/bloom_filter_test.cpp
   unit/check_test.cpp
   unit/coding_test.cpp
   unit/crc32c_test.cpp
@@ -25,6 +27,7 @@ add_executable(forgedb_unit_tests
   unit/fault_injection_file_system_test.cpp
   unit/filename_test.cpp
   unit/file_system_conformance_test.cpp
+  unit/hash_test.cpp
   unit/internal_key_test.cpp
   unit/log_test.cpp
   unit/memtable_test.cpp

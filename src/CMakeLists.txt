@@ -22,9 +22,14 @@ add_library(forgedb STATIC
   log/log_writer.cpp
   memtable/arena.cpp
   memtable/memtable.cpp
+  table/block.cpp
+  table/block_builder.cpp
+  table/block_format.cpp
+  table/bloom_filter.cpp
   util/check.cpp
   util/coding.cpp
   util/crc32c.cpp
+  util/hash.cpp
   util/status.cpp
 )
 add_library(forgedb::forgedb ALIAS forgedb)

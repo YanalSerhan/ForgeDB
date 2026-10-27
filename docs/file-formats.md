@@ -224,7 +224,101 @@ length field is damaged and data follows, so it is mid-log corruption (ADR 0004,
 
 ## Table file (.sst): blocks, filter, index, footer
 
-Phase 3.
+A table file holds sorted, immutable key/value entries. It is made of blocks, each protected by a
+trailer: data blocks and the index block are in the "Block" format below, and the bloom filter is
+stored the same way. How the blocks are arranged in the file (the index and the footer) arrives
+with the table builder in Phase 3.3.
+
+### Block trailer
+
+Code: `src/table/block_format.h`, `src/table/block_format.cpp`. Tests:
+`tests/unit/block_test.cpp` (`BlockTrailerTest`).
+
+Every block in a table file is followed by 5 bytes:
+
+```
++-------------------+---------------+-------------------------+
+| contents (n B)    | type: 1 byte  | CRC: fixed32 (masked)   |
++-------------------+---------------+-------------------------+
+                     <------------- 5-byte trailer ----------->
+```
+
+- `type`: `0` uncompressed. No other type is written yet; reading any other value is
+  `Corruption` ("unknown block type").
+- `CRC` is the masked CRC-32C (see "Checksums") of the contents followed by the type byte.
+- The trailer is checked (CRC first, then type) before any of the contents are used.
+
+### Block
+
+Code: `src/table/block_builder.*`, `src/table/block.*`. Tests: `tests/unit/block_test.cpp`.
+
+The contents of a data or index block: entries sorted by key, then an array of *restart points*.
+
+```
++-----------+-----------+-----+------------------------------+----------------------+
+| entry 0   | entry 1   | ... | restart offsets: fixed32 × r | restart count r:     |
+|           |           |     | (byte offset of an entry)    | fixed32              |
++-----------+-----------+-----+------------------------------+----------------------+
+
+entry:  varint32 shared | varint32 unshared | varint32 value size | key bytes [shared..] | value
+```
+
+- **Prefix compression.** An entry's key is the first `shared` bytes of the previous entry's key
+  followed by the `unshared` bytes stored in the entry.
+- **Restart points.** Every 16th entry (the interval is a builder setting; the index block's is
+  chosen in Phase 3.3) starts a restart point: it stores its whole key (`shared = 0`), and its
+  offset is listed in the restart array. Entry 0 is always a restart point, so the first offset
+  is `0`. A reader binary-searches the restart points' keys, then decodes forward.
+- Keys are in strictly increasing order of the block's comparison: internal keys (see
+  "Internal key") in data and index blocks.
+- An empty block is the 8 bytes `00 00 00 00 01 00 00 00`: one restart point at offset 0, no
+  entries.
+- Example: the entries `ab` → `1`, `ac` → `2` are 19 bytes:
+  `00 02 01 61 62 31 | 01 01 01 63 32 | 00 00 00 00 | 01 00 00 00`.
+
+Validation (after the trailer has been checked):
+
+- When opened: at least 4 bytes; a restart count of at least 1 whose array fits in the block; the
+  first restart offset is `0`; the others strictly increase and point into the entry area (before
+  the restart array). An empty entry area allows exactly one restart point.
+- While reading: every entry's varints and bytes lie inside the entry area; `shared` is at most
+  the previous key's length and `0` at a restart point; no restart offset falls inside an entry.
+- Any violation is a `Corruption` status naming the problem and the block offset. Key order is
+  not checked on read (the CRC rules out damage; the builder checks order in debug builds).
+
+### Bloom filter
+
+Code: `src/table/bloom_filter.*`, `src/util/hash.*`. Tests: `tests/unit/bloom_filter_test.cpp`,
+`tests/unit/hash_test.cpp`. Design: ADR 0005 (one filter per table).
+
+A table has one bloom filter over the user keys of all its entries (each distinct user key once,
+whatever its number of versions). A lookup that the filter rejects skips the table.
+
+```
++---------------------------------------+-------------+
+| bit array: m bits (m / 8 bytes)       | k: 1 byte   |
++---------------------------------------+-------------+
+```
+
+- Bit `b` is bit `b mod 8` (least significant first) of byte `b / 8`.
+- `m = 8 × ceil(max(64, n × bits_per_key) / 8)` for `n` keys; `k = round(bits_per_key × ln 2)`,
+  clamped to `[1, 30]` (k = 7 at 10 bits per key).
+- Each key sets `k` bits by *enhanced double hashing* (Dillinger and Manolios, FMCAD 2004) from
+  `(low, high)` = MurmurHash3 x64_128 of the key with seed 0 (`low` is the reference
+  implementation's first output word), in unsigned 64-bit arithmetic that wraps around:
+
+  ```
+  x = low; y = high
+  for i = 1 .. k:  set bit (x mod m);  x = x + y;  y = y + i
+  ```
+
+  A lookup tests the same bits; any bit clear means the key is not in the table.
+- MurmurHash3 x64_128 reads the input as little-endian 64-bit words (Austin Appleby's public
+  domain reference, `MurmurHash3_x64_128`). It is part of the format and never changes.
+- A filter for no keys is 8 zero bytes and `k`: it rejects every key.
+- Example: `hello` and `world` at 10 bits per key → `04 00 0A 98 11 06 21 08 07`.
+- A filter shorter than 2 bytes, or with `k` outside `[1, 30]`, matches every key: a damaged
+  filter can cost reads, never hide a key.
 
 ## MANIFEST and CURRENT
 
