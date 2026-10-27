@@ -14,18 +14,13 @@ set(FORGEDB_FUZZ_SMOKE_SECONDS 60 CACHE STRING "Seconds per fuzz target in the c
 
 # CMake links with lld-link directly, not through clang-cl, so the libFuzzer
 # runtime has to be named (as the ASan runtime is, in ForgeDBSanitizers.cmake).
-# Sanitizer builds use the DLL CRT (/MD), so it must be the _MD build:
-# clang_rt.fuzzer-x86_64.lib is built for the static CRT (/MT) and fails to
-# link with "mismatch detected for 'RuntimeLibrary'" (seen with LLVM 22).
-find_file(FORGEDB_LIBFUZZER_MD_LIB
-  NAMES "clang_rt.fuzzer_MD${FORGEDB_CLANG_RT_SUFFIX}.lib"
-  PATHS "${FORGEDB_CLANG_RT_DIR}"
-  NO_DEFAULT_PATH)
-if(NOT FORGEDB_LIBFUZZER_MD_LIB)
+# It is built for the static release CRT, which is why the fuzz preset uses
+# /MT (ForgeDBSanitizers.cmake); LLVM 22 ships no /MD build of it.
+set(_libfuzzer "clang_rt.fuzzer${FORGEDB_CLANG_RT_SUFFIX}.lib")
+if(NOT EXISTS "${FORGEDB_CLANG_RT_DIR}/${_libfuzzer}")
   message(FATAL_ERROR
-    "libFuzzer runtime for the DLL CRT (clang_rt.fuzzer_MD${FORGEDB_CLANG_RT_SUFFIX}.lib) not found "
-    "in ${FORGEDB_CLANG_RT_DIR}. Is the 'C++ Clang Compiler for Windows' component installed "
-    "completely?")
+    "libFuzzer runtime ${_libfuzzer} not found in ${FORGEDB_CLANG_RT_DIR}. "
+    "Libraries there: ${FORGEDB_CLANG_RT_LIBS}")
 endif()
 
 function(forgedb_add_fuzzer name source)
@@ -35,7 +30,7 @@ function(forgedb_add_fuzzer name source)
   forgedb_target_defaults(${name})
   target_compile_options(${name} PRIVATE -fsanitize=fuzzer)
   # Whole archive, as clang-cl does it: libFuzzer provides main().
-  target_link_options(${name} PRIVATE "/WHOLEARCHIVE:${FORGEDB_LIBFUZZER_MD_LIB}")
+  target_link_options(${name} PRIVATE "/WHOLEARCHIVE:${FORGEDB_CLANG_RT_DIR}/${_libfuzzer}")
 endfunction()
 
 forgedb_add_fuzzer(forgedb_fuzz_log_reader fuzz_log_reader.cpp)

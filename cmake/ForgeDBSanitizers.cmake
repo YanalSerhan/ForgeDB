@@ -33,7 +33,9 @@ if(FORGEDB_ASAN)
   # Sanitizer builds use RelWithDebInfo, never Debug:
   #  - CMake's default MSVC Debug flags include /RTC1, which cannot be combined
   #    with /fsanitize=address.
-  #  - LLVM's ASan runtime on Windows supports only the release CRT (/MD), not /MDd.
+  #  - LLVM's ASan runtime on Windows supports only the release CRT, not the
+  #    debug one (/MDd). ASan presets use /MD; the fuzz preset uses /MT,
+  #    because LLVM's libFuzzer is built for it (see below).
   # Invariant checks stay on through FORGEDB_ENABLE_ASSERTS, which ignores NDEBUG.
   if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     message(FATAL_ERROR
@@ -81,11 +83,32 @@ if(FORGEDB_ASAN)
       set(FORGEDB_CLANG_RT_SUFFIX "")
     endif()
 
+    # Every clang runtime library found, for error messages.
+    file(GLOB _forgedb_clang_rt_libs RELATIVE "${FORGEDB_CLANG_RT_DIR}" "${FORGEDB_CLANG_RT_DIR}/clang_rt.*.lib")
+    string(REPLACE ";" ", " FORGEDB_CLANG_RT_LIBS "${_forgedb_clang_rt_libs}")
+
+    if(FORGEDB_SANITIZE STREQUAL "fuzzer")
+      # LLVM's libFuzzer for Windows (clang_rt.fuzzer) is built for the static
+      # release CRT, and LLVM 22 ships no /MD build of it, so fuzz builds use
+      # the static CRT (/MT) as well. The ASan runtime is the same DLL either
+      # way; with /MT it is entered through its static-CRT thunk. (This is
+      # what clang-cl itself links for -fsanitize=fuzzer,address /MT.)
+      set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
+      set(_forgedb_asan_thunk "clang_rt.asan_static_runtime_thunk${FORGEDB_CLANG_RT_SUFFIX}.lib")
+    else()
+      set(_forgedb_asan_thunk "clang_rt.asan_dynamic_runtime_thunk${FORGEDB_CLANG_RT_SUFFIX}.lib")
+    endif()
+    if(NOT EXISTS "${FORGEDB_CLANG_RT_DIR}/${_forgedb_asan_thunk}")
+      message(FATAL_ERROR
+        "${_forgedb_asan_thunk} not found in ${FORGEDB_CLANG_RT_DIR}. "
+        "Libraries there: ${FORGEDB_CLANG_RT_LIBS}")
+    endif()
+
     # The runtime thunk must be linked whole so none of its interceptors are dropped.
     set(FORGEDB_ASAN_LINK_OPTIONS
       "/LIBPATH:${FORGEDB_CLANG_RT_DIR}"
       "clang_rt.asan_dynamic${FORGEDB_CLANG_RT_SUFFIX}.lib"
-      "/WHOLEARCHIVE:clang_rt.asan_dynamic_runtime_thunk${FORGEDB_CLANG_RT_SUFFIX}.lib")
+      "/WHOLEARCHIVE:${_forgedb_asan_thunk}")
     list(APPEND _forgedb_asan_dll_dirs "${FORGEDB_CLANG_RT_DIR}")
   else()
     # cl.exe /fsanitize=address embeds the linker directives for its own ASan
@@ -111,15 +134,22 @@ function(forgedb_apply_sanitizers target)
     return()
   endif()
 
-  # STL container annotations stay ON in our code. The vcpkg libraries linked
-  # into ASan builds come from the x64-windows-static-md-asan overlay triplet
-  # (triplets/), built with _ANNOTATE_STL, so they don't trigger the linker's
-  # 'annotate_*' mismatch check (LNK2038). See that triplet file for details.
+  # STL container annotations stay ON in our code in ASan builds. The vcpkg
+  # libraries linked into them come from the x64-windows-static-md-asan
+  # overlay triplet (triplets/), built with _ANNOTATE_STL, so they don't
+  # trigger the linker's 'annotate_*' mismatch check (LNK2038). See that
+  # triplet file for details.
 
   if(FORGEDB_SANITIZE STREQUAL "fuzzer")
     # Coverage instrumentation without libFuzzer's main(); fuzz targets add
     # -fsanitize=fuzzer themselves (Phase 2.7).
     target_compile_options(${target} PRIVATE -fsanitize=fuzzer-no-link,address)
+    # LLVM's prebuilt libFuzzer uses std::string and std::vector without the
+    # annotations, and we cannot rebuild it, so fuzz builds turn them off
+    # everywhere (every target, so all objects agree). The cost: no
+    # container-overflow reports in fuzz runs; out-of-bounds heap access is
+    # still caught, and the ASan presets keep the annotations.
+    target_compile_definitions(${target} PRIVATE _DISABLE_STRING_ANNOTATION _DISABLE_VECTOR_ANNOTATION)
   elseif(FORGEDB_COMPILER_CLANG_CL)
     target_compile_options(${target} PRIVATE -fsanitize=address)
   else()
