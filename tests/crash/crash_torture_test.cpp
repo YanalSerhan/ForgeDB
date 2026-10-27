@@ -42,8 +42,11 @@
 
 #include "db/db_impl.h"
 #include "env/mem_file_system.h"
+#include "log/log_format.h"
 #include "support/fault_injection_file_system.h"
 #include "support/test_env.h"
+#include "util/coding.h"
+#include "util/crc32c.h"
 
 #ifndef FORGEDB_CRASH_TEST_CYCLES
 #define FORGEDB_CRASH_TEST_CYCLES 200
@@ -100,9 +103,25 @@ class Random {
   std::mt19937_64 rng_;
 };
 
+// A valid, complete log fragment (FULL, holding `payload`), as a value may
+// contain one: a log file stored as a value, or bytes chosen to look like one.
+std::string LogFragment(std::string_view payload) {
+  std::string fragment;
+  const char type = static_cast<char>(log::RecordType::kFull);
+  PutFixed32(fragment,
+             crc32c::Mask(crc32c::Extend(crc32c::Value(std::string_view(&type, 1)), payload)));
+  fragment.push_back(static_cast<char>(payload.size() & 0xFFU));
+  fragment.push_back(static_cast<char>(payload.size() >> 8U));
+  fragment.push_back(type);
+  fragment.append(payload);
+  return fragment;
+}
+
 // Mostly small values; some large enough to cross 32 KiB log blocks, so torn
-// tails and crashes land inside multi-fragment records too.
-std::string RandomValue(Random& random, std::uint64_t tag) {
+// tails and crashes land inside multi-fragment records too. With
+// `log_fragments`, many values also contain valid log fragments: recovery
+// must not mistake them for log data after a torn record (Phase 2.7).
+std::string RandomValue(Random& random, std::uint64_t tag, bool log_fragments) {
   std::size_t size = 0;
   const std::uint64_t roll = random.Below(100);
   if (roll < 60) {
@@ -112,12 +131,19 @@ std::string RandomValue(Random& random, std::uint64_t tag) {
   } else {
     size = 5000 + random.Below(40000);
   }
+  const char filler = static_cast<char>('a' + (tag % 26));
   std::string value = "v" + std::to_string(tag) + ":";
-  value.resize(std::max(size, value.size()), static_cast<char>('a' + (tag % 26)));
+  if (log_fragments && random.Percent(50)) {
+    for (std::uint64_t i = 1 + random.Below(4); i > 0; --i) {
+      value.append(random.Below(40), filler);
+      value += LogFragment(std::string(random.Below(20), filler));
+    }
+  }
+  value.resize(std::max(size, value.size()), filler);
   return value;
 }
 
-Batch RandomBatch(Random& random, std::uint64_t tag) {
+Batch RandomBatch(Random& random, std::uint64_t tag, bool log_fragments) {
   std::size_t size = 1;
   const std::uint64_t roll = random.Below(100);
   if (roll < 5) {
@@ -131,7 +157,7 @@ Batch RandomBatch(Random& random, std::uint64_t tag) {
     mutation.key = "k" + std::to_string(random.Below(kKeySpace));
     mutation.is_put = random.Percent(75);
     if (mutation.is_put) {
-      mutation.value = RandomValue(random, tag);
+      mutation.value = RandomValue(random, tag, log_fragments);
     }
     batch.push_back(std::move(mutation));
   }
@@ -166,7 +192,8 @@ State ReadAll(DB& db) {
 struct TortureOptions {
   FaultInjectionFileSystem::Options fs;
   std::size_t cycles = FORGEDB_CRASH_TEST_CYCLES;
-  bool inject_errors = false;  // fail a random Append, Flush or Sync in most cycles
+  bool inject_errors = false;            // fail a random Append, Flush or Sync in most cycles
+  bool log_fragments_in_values = false;  // see RandomValue
   // With zero_pages_in_unsynced_tail, ADR 0004's strict rule can refuse to
   // open (deferred to Phase 3.6). Then only the weaker promise is checked:
   // an open either fails with Corruption or recovers a correct prefix.
@@ -272,7 +299,10 @@ class Torture {
     }
     if (options_.inject_errors && random_.Percent(70)) {
       constexpr std::array<Op, 3> kOps = {Op::kAppend, Op::kFlush, Op::kSync};
-      fs_->FailNth(kOps.at(random_.Below(kOps.size())), 1 + random_.Below(3 * writes));
+      // Two statements: the order of evaluation of function arguments is
+      // unspecified, and a seed must give the same run with every compiler.
+      const Op op = kOps.at(random_.Below(kOps.size()));
+      fs_->FailNth(op, 1 + random_.Below(3 * writes));
     }
 
     // 3. Write.
@@ -283,7 +313,7 @@ class Torture {
     std::size_t synced = 0;
     bool failed = false;
     for (std::size_t i = 0; i < writes && !failed; ++i) {
-      Batch batch = RandomBatch(random_, (cycle_ * 1000) + i);
+      Batch batch = RandomBatch(random_, (cycle_ * 1000) + i, options_.log_fragments_in_values);
       const bool sync = random_.Percent(20);
       const Status status = db_->Write({.sync = sync}, ToWriteBatch(batch));
       next.batches.push_back(std::move(batch));
@@ -475,6 +505,19 @@ TEST(CrashTortureTest, PartlyKeptUnsyncedTails) {
 
 TEST(CrashTortureTest, DroppedUnsyncedTails) {
   ExpectEverythingExercised(RunAll("dropped tails", WithTail(UnsyncedTail::kDrop)));
+}
+
+// Found by fuzzing (2.7): a torn record whose value contains a valid log
+// fragment used to make recovery fail with Corruption. Many values here
+// contain such fragments; every recovery must still succeed.
+TEST(CrashTortureTest, ValuesContainingLogFragments) {
+  TortureOptions options = WithTail(UnsyncedTail::kKeepPrefixTorn);
+  options.log_fragments_in_values = true;
+  const Stats stats = RunAll("log fragments in values", options);
+  ExpectEverythingExercised(stats);
+  if (stats.cycles >= 100) {
+    EXPECT_GT(stats.torn_tails, 0U);
+  }
 }
 
 // TODO 2.5: after a failed Append, Flush or Sync, the DB refuses every later

@@ -10,7 +10,9 @@ ForgeDB is a crash-safe, embedded key-value storage engine based on a log-struct
 log with group commit, live in a lock-free-read skip list memtable, and are flushed to immutable
 sorted table files that are compacted in the background; a MANIFEST tracks every live file so the
 database recovers to a consistent state after a crash. The core library has no third-party
-dependencies. **Status: Phase 0 (foundations), not usable yet.** See [TODO.md](TODO.md) for the plan.
+dependencies. **Status: Phase 2 (write-ahead log and crash recovery).** Data lives in the memtable
+and the log until Phase 3 adds table files; not for production use. See [TODO.md](TODO.md) for the
+plan.
 
 ## Building on Windows
 
@@ -57,7 +59,7 @@ ctest --preset msvc-debug
 | `clangcl-asan`  | clang-cl | RelWithDebInfo | AddressSanitizer, assertions on         |
 | `clangcl-tidy`  | clang-cl | Debug          | clang-tidy on every file; build only    |
 | `msvc-analyze`  | MSVC     | Debug          | `/analyze` on the library; build only   |
-| `clangcl-fuzz`  | clang-cl | RelWithDebInfo | libFuzzer + ASan; library and fuzz targets only |
+| `clangcl-fuzz`  | clang-cl | RelWithDebInfo | libFuzzer + ASan; library and fuzz targets; `ctest` runs a 60 s fuzz smoke test per target |
 
 Build output goes to `out/build/<preset>/`. Microbenchmarks (release preset only):
 `out\build\msvc-release\bench\forgedb_microbench.exe`.
@@ -76,13 +78,31 @@ Other scripts (same environment setup, usable locally and in CI):
 powershell -ExecutionPolicy Bypass -File scripts\check-format.ps1        # add -Fix to reformat
 powershell -ExecutionPolicy Bypass -File scripts\coverage.ps1            # after building msvc-debug;
                                                                          # needs: choco install opencppcoverage
+powershell -ExecutionPolicy Bypass -File scripts\fuzz.ps1                # 1 hour per fuzz target; -Seconds N
 ```
+
+## Testing
+
+| Suite | What it checks |
+|-------|----------------|
+| `forgedb_unit_tests` | every component; the `FileSystem` contract against each implementation |
+| `forgedb_model_tests` | random operations, including closing and reopening, compared with `std::map` (3 seeds × 1,000,000 operations in release builds) |
+| `forgedb_crash_tests` | crash torture: thousands of simulated crashes on the fault-injection file system; process kill: real crashes with `TerminateProcess` |
+| fuzz targets (`clangcl-fuzz`) | the log reader and write batch decoding on untrusted bytes |
+
+**What the crash tests cover.** The process-kill test kills a real process on Windows, so it covers
+process crashes: data the operating system has accepted survives them. Power loss and operating
+system crashes cannot be produced on real hardware in a test; they are covered only by the
+fault-injection model of what Windows documents (ADR 0002), which the crash torture test runs.
+
+Longer runs than CI's: `FORGEDB_CRASH_CYCLES=10000` and `FORGEDB_KILL_RUNS=500` (environment
+variables for `forgedb_crash_tests`), and `scripts\fuzz.ps1`.
 
 ## Continuous integration
 
 GitHub Actions on `windows-2025-vs2026` (`.github/workflows/ci.yml`): one job per preset running
-`scripts\build-all.ps1`, a coverage job (OpenCppCoverage, report uploaded as an artifact), and a
-clang-format check. vcpkg packages are cached between runs. ASan builds include a canary test
+`scripts\build-all.ps1` (the `clangcl-fuzz` job runs the fuzz smoke test), a coverage job
+(OpenCppCoverage, report uploaded as an artifact), and a clang-format check. vcpkg packages are cached between runs. ASan builds include a canary test
 that overflows a heap buffer on purpose and passes only if ASan reports it.
 
 **Troubleshooting.** Other toolchains on `PATH` can shadow Visual Studio's tools; Strawberry Perl,

@@ -15,6 +15,15 @@
 //   a problem is a torn tail if and only if no valid fragment exists
 //   anywhere after it in the file.
 //
+// "After it" excludes the damaged fragment's own payload when its header is
+// intact (a known type and a length that fits its block): the payload is user
+// data and may contain bytes that form a valid fragment, e.g. a log file
+// stored as a value. For such a fragment the CRC decides instead whether the
+// length field itself is damaged: if a shorter prefix of the payload matches
+// the CRC, the real fragment ended there and data follows, so it is
+// corruption. A torn fragment's CRC covers its whole, never-finished payload,
+// so no prefix matches it. (ADR 0004, amended in Phase 2.7.)
+//
 // A crash can only damage the end of a log: the record being written when the
 // power failed, and anything after the last Sync. That leaves an incomplete
 // header or payload, a chain of fragments that never finishes, garbage, or
@@ -103,6 +112,13 @@ class Reader {
 
   std::uint64_t problem_offset_ = 0;
   std::string problem_reason_;
+  // Where ClassifyProblem starts looking for valid fragments in the problem's
+  // block: past the damaged fragment's own payload when its header is intact,
+  // because that payload is user data and may hold anything.
+  std::size_t problem_search_from_ = 0;
+  // Set when the damaged fragment's length field is shown to be wrong: a
+  // shorter prefix of its payload matches its CRC, and data follows it.
+  bool problem_length_damaged_ = false;
 
   bool finished_ = false;
   Status final_status_;  // what a finished reader returns: OK (end) or the error

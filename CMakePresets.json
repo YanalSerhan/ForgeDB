@@ -107,6 +107,7 @@
     { "name": "msvc-release", "inherits": "test-base", "configurePreset": "msvc-release" },
     { "name": "msvc-asan", "inherits": "test-base", "configurePreset": "msvc-asan" },
     { "name": "clangcl-debug", "inherits": "test-base", "configurePreset": "clangcl-debug" },
-    { "name": "clangcl-asan", "inherits": "test-base", "configurePreset": "clangcl-asan" }
+    { "name": "clangcl-asan", "inherits": "test-base", "configurePreset": "clangcl-asan" },
+    { "name": "clangcl-fuzz", "inherits": "test-base", "configurePreset": "clangcl-fuzz" }
   ]
 }

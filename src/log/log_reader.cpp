@@ -52,6 +52,26 @@ std::size_t FindValidFragment(std::string_view block, std::size_t from) noexcept
   return std::string_view::npos;
 }
 
+// Whether some prefix of `payload` shorter than `limit` bytes matches the
+// header's CRC, i.e. the fragment's real length is shorter than its length
+// field says. A torn fragment's CRC covers its whole, never-finished payload,
+// so no prefix matches it (except by a 1 in 2^32 coincidence per length).
+bool ShorterPrefixMatchesCrc(const Header& header, std::string_view payload,
+                             std::size_t limit) noexcept {
+  const std::uint32_t want = crc32c::Unmask(header.masked_crc);
+  const auto type = static_cast<char>(header.type);
+  std::uint32_t crc = crc32c::Value(std::string_view(&type, 1));
+  for (std::size_t length = 0; length < limit && length <= payload.size(); ++length) {
+    if (crc == want) {
+      return true;
+    }
+    if (length < payload.size()) {
+      crc = crc32c::Extend(crc, payload.substr(length, 1));
+    }
+  }
+  return false;
+}
+
 std::string OffsetText(std::uint64_t offset) { return "offset " + std::to_string(offset); }
 
 }  // namespace
@@ -86,6 +106,8 @@ Result<Reader::Next> Reader::ReadFragment(Fragment* fragment) {
         return Next::kEnd;
       }
       problem_offset_ = block_file_offset_ + block_position_;
+      problem_search_from_ = block_position_ + 1;
+      problem_length_damaged_ = false;
       problem_reason_ = "the file ends inside a fragment header";
       return Next::kProblem;
     }
@@ -93,9 +115,20 @@ Result<Reader::Next> Reader::ReadFragment(Fragment* fragment) {
     const char* const start = block_.data() + block_position_;
     const Header header = DecodeHeader(std::string_view(start, remaining));
     problem_offset_ = block_file_offset_ + block_position_;
+    problem_search_from_ = block_position_ + 1;
+    problem_length_damaged_ = false;
+    const bool known_type = header.type != 0 && header.type <= kMaxRecordType;
     if (header.length > remaining - kHeaderSize) {
       problem_reason_ = eof_ ? "the file ends inside a fragment"
                              : "fragment length runs past the end of its block";
+      if (eof_ && known_type && header.length <= kBlockSize - block_position_ - kHeaderSize) {
+        // An intact header whose payload the end of the file cut off: what a
+        // crash leaves. Its payload is not searched (user data), unless the
+        // CRC shows the length field itself is damaged.
+        const std::string_view payload(start + kHeaderSize, remaining - kHeaderSize);
+        problem_length_damaged_ = ShorterPrefixMatchesCrc(header, payload, payload.size());
+        problem_search_from_ = block_.size();
+      }
       return Next::kProblem;
     }
     if (header.type == static_cast<std::uint8_t>(RecordType::kZero)) {
@@ -107,6 +140,11 @@ Result<Reader::Next> Reader::ReadFragment(Fragment* fragment) {
       return Next::kProblem;
     }
     if (!CrcMatches(header, std::string_view(start + kHeaderSize - 1, 1 + header.length))) {
+      // Damage inside the fragment (or a torn write at its end). Its payload
+      // is not searched (user data), unless the length field is damaged.
+      const std::string_view payload(start + kHeaderSize, header.length);
+      problem_length_damaged_ = ShorterPrefixMatchesCrc(header, payload, header.length);
+      problem_search_from_ = block_position_ + kHeaderSize + header.length;
       problem_reason_ = "fragment checksum mismatch";
       return Next::kProblem;
     }
@@ -195,13 +233,20 @@ Result<std::optional<std::string_view>> Reader::ClassifyProblem(std::uint64_t ta
   // starts every block with a fragment header. That keeps the cost linear in
   // the size of the damaged file instead of quadratic.
   //
-  // Limitation: a torn record whose own payload happens to contain bytes that
-  // form a valid fragment (e.g. a log file stored as a value) is reported as
-  // corruption instead of a torn tail: a false alarm, never a silent loss.
+  // When the damaged fragment's header is intact, the search starts after
+  // its payload: the payload is user data and may contain bytes that form a
+  // valid fragment (a log file stored as a value). Searching it made a torn
+  // record read as corruption (found by fuzzing, Phase 2.7; ADR 0004).
+  // Whether its length field is damaged is decided by its CRC instead.
   std::uint64_t found_at = 0;
   bool found = false;
   int byte_scanned_blocks = 0;
-  std::size_t from = static_cast<std::size_t>(problem_offset_ - block_file_offset_) + 1;
+  if (problem_length_damaged_) {
+    return Finish(Status::Corruption(
+        "log corrupted: fragment length field damaged",
+        "at " + OffsetText(problem_offset_) + " (a shorter length matches its checksum)"));
+  }
+  std::size_t from = problem_search_from_;
   while (true) {
     const std::string_view block(block_);
     if (byte_scanned_blocks < 2) {

@@ -322,7 +322,8 @@ TEST(WriteBatchTest, RandomDamageNeverCrashesOrLeaksPartialBatches) {
     WriteBatch batch;
     const int operations = static_cast<int>(rng() % 6);
     for (int i = 0; i < operations; ++i) {
-      const std::string key(rng() % 20, static_cast<char>('a' + (rng() % 26)));
+      const std::size_t key_size = rng() % 20;  // separate: argument order is unspecified
+      const std::string key(key_size, static_cast<char>('a' + (rng() % 26)));
       if (rng() % 3 == 0) {
         batch.Delete(key);
       } else {

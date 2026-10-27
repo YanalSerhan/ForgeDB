@@ -216,6 +216,11 @@ The search for a later valid fragment checks every byte offset in the rest of th
 block and in the next block, then only the start of each later block (where the writer always
 starts a fragment).
 
+When the damaged fragment's header is intact (a known type and a length within its block), its
+own payload is not searched: it is user data and may contain bytes that look like a fragment.
+Instead, if a prefix of that payload shorter than the stated length matches the stored CRC, the
+length field is damaged and data follows, so it is mid-log corruption (ADR 0004, rule 5).
+
 
 ## Table file (.sst): blocks, filter, index, footer
 

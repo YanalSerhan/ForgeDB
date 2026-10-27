@@ -69,22 +69,39 @@ target_compile_definitions(forgedb_model_tests PRIVATE
 forgedb_target_defaults(forgedb_model_tests)
 gtest_discover_tests(forgedb_model_tests DISCOVERY_MODE PRE_TEST)
 
-# Crash torture test (TODO 2.5): random crashes on the fault-injection file
-# system, checking recovery after each. Optimized builds run more crash cycles
-# per test than debug and sanitizer builds. FORGEDB_CRASH_CYCLES and
-# FORGEDB_CRASH_SEED override at run time (long runs: locally).
+# Crash tests.
+#  - Crash torture (TODO 2.5): random crashes on the fault-injection file
+#    system, checking recovery after each. FORGEDB_CRASH_CYCLES and
+#    FORGEDB_CRASH_SEED override at run time (long runs: locally).
+#  - Process kill (TODO 2.6): real crashes. The test starts
+#    forgedb_crash_child (built next to it), kills it with TerminateProcess
+#    and checks the database. FORGEDB_KILL_RUNS and FORGEDB_KILL_SEED override.
+# Optimized builds run more cycles and kills than debug and sanitizer builds.
+add_executable(forgedb_crash_child
+  crash/crash_child.cpp
+)
+target_link_libraries(forgedb_crash_child PRIVATE forgedb::forgedb)
+target_include_directories(forgedb_crash_child PRIVATE
+  "${PROJECT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}")
+forgedb_target_defaults(forgedb_crash_child)
+
 add_executable(forgedb_crash_tests
   crash/crash_torture_test.cpp
+  crash/process_kill_test.cpp
 )
+add_dependencies(forgedb_crash_tests forgedb_crash_child)
 target_link_libraries(forgedb_crash_tests PRIVATE
   forgedb::forgedb forgedb_test_support GTest::gtest_main)
 if(CMAKE_BUILD_TYPE STREQUAL "Release" AND NOT FORGEDB_ASAN)
   set(forgedb_crash_cycles 400)
+  set(forgedb_kill_runs 50)
 else()
   set(forgedb_crash_cycles 100)
+  set(forgedb_kill_runs 20)
 endif()
 target_compile_definitions(forgedb_crash_tests PRIVATE
-  FORGEDB_CRASH_TEST_CYCLES=${forgedb_crash_cycles})
+  FORGEDB_CRASH_TEST_CYCLES=${forgedb_crash_cycles}
+  FORGEDB_KILL_TEST_RUNS=${forgedb_kill_runs})
 forgedb_target_defaults(forgedb_crash_tests)
 gtest_discover_tests(forgedb_crash_tests DISCOVERY_MODE PRE_TEST)
 

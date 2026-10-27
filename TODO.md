@@ -44,7 +44,7 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - [x] Cache vcpkg binary packages between runs (vcpkg `files` provider + `actions/cache`; the old `x-gha` provider was removed from vcpkg)
 - [x] `ctest --output-on-failure` in every job; upload logs on failure
 - [x] Coverage job with OpenCppCoverage; publish the report as an artifact; gate at 85% from Phase 1 on (gate is `COVERAGE_MIN_LINE_PERCENT` in ci.yml: 85 since the end of Phase 1)
-- [ ] Fuzz smoke job (clang-cl): 60 seconds per target on each PR (from Phase 2 on) (deferred to 2.7, when the first fuzz targets exist)
+- [x] Fuzz smoke job (clang-cl): 60 seconds per target on each PR (from Phase 2 on) (2.7: a ctest test in the `clangcl-fuzz` job)
 
 ### 0.3 Utilities
 - [x] `Status` (code + message) and `Result<T>` (value or `Status`), both `[[nodiscard]]` (+ `FORGEDB_RETURN_IF_ERROR`, `FORGEDB_ASSIGN_OR_RETURN`, and `FORGEDB_CHECK`/`FORGEDB_DCHECK` in `forgedb/check.h`)
@@ -196,19 +196,21 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - [ ] Renames and removals: once Phase 3.6 uses them, run with the default (not durable) and settle ADR 0002's open question
 
 ### 2.6 Process-kill test (real crash, Windows)
-- [ ] `tests/crash/crash_child.exe`: writes keys with `sync = true`, appends each acknowledged key to a side file
-- [ ] Parent launches it with `CreateProcessW`, waits a random time, kills it with `TerminateProcess`, reopens the DB and checks every acknowledged key
-- [ ] Note in the README: this covers process crashes; power loss is covered only by the fault-injection model
+- [x] `tests/crash/crash_child.exe` (`forgedb_crash_child`): writes keys with `sync = true` (batches of 1-5 keys), appends each acknowledged key to a side file (flushed to the OS, so a kill cannot lose it)
+- [x] Parent (`ProcessKillTest`, in `forgedb_crash_tests`) launches it with `CreateProcessW`, waits a random time (a quarter of kills land while the child opens and recovers), kills it with `TerminateProcess`, reopens the DB and checks every acknowledged key and its value, that the child's keys form a prefix (no holes; at most one unrecorded batch more), and that earlier runs' keys are untouched. `FORGEDB_KILL_RUNS` / `FORGEDB_KILL_SEED`; CI: 50 kills in release builds, 20 in debug and sanitizer builds
+- [x] Note in the README: this covers process crashes; power loss is covered only by the fault-injection model
 
 ### 2.7 Fuzzing
-- [ ] `fuzz/fuzz_log_reader.cpp` and `fuzz/fuzz_write_batch.cpp` with seed corpus
-- [ ] Build with clang-cl `-fsanitize=fuzzer,address` (or MSVC `/fsanitize=fuzzer` and `/fsanitize=address` as separate flags)
-- [ ] Enable the CI fuzz smoke job
+- [x] `fuzz/fuzz_log_reader.cpp` (raw bytes; and a write / cut / read-back round trip that must return exactly the complete records) and `fuzz/fuzz_write_batch.cpp` (all-or-nothing decoding, re-encoding, memtable insert), with a seed corpus written by `forgedb_fuzz_seeds` (no binary files in git)
+- [x] Build with clang-cl `-fsanitize=fuzzer,address` (libFuzzer runtime linked by name, like the ASan runtime)
+- [x] Enable the CI fuzz smoke job: `ctest --preset clangcl-fuzz` runs each target for 60 s (`FORGEDB_FUZZ_SMOKE_SECONDS`), so the existing `clangcl-fuzz` CI job runs it through `build-all.ps1`; long runs: `scripts\fuzz.ps1`
+- [x] Fuzzing found a recovery bug: a record whose value contains the bytes of a valid log fragment, torn by a crash, made the open fail with `Corruption` (ADR 0004's search for later valid data looked inside the torn record's own payload). Fixed (approved): an intact fragment's own payload is not searched; its CRC decides whether its length field is damaged (ADR 0004, rule 5). New tests in `log_test.cpp` and `CrashTortureTest.ValuesContainingLogFragments`
 
 ### ✅ Exit gate — Phase 2
 - [ ] 10,000 crash-torture iterations with zero lost synced writes and zero recovery failures
-- [ ] 500 process-kill runs pass
-- [ ] Each fuzz target ran 1 hour locally with no crashes and no ASan reports
+  - Linux run (2.7, before the Windows run): 10,002 cycles per variant, none lost, no recovery failures except the zero-filled-pages variant (deferred to 3.6). Windows: `FORGEDB_CRASH_CYCLES=3334` (× 3 seeds)
+- [ ] 500 process-kill runs pass (Windows only: `FORGEDB_KILL_RUNS=500`)
+- [ ] Each fuzz target ran 1 hour locally with no crashes and no ASan reports (Windows: `scripts\fuzz.ps1`)
 
 ---
 

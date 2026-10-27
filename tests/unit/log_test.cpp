@@ -403,6 +403,81 @@ TEST_F(LogTest, DamagedLengthInTheLastBlockWithRecordsAfterIsCorruption) {
   EXPECT_TRUE(IsCorruption(result.status)) << result.status.ToString();
 }
 
+// --- Payloads that look like log data (found by fuzzing, Phase 2.7) -----------------
+
+// A valid, complete FULL fragment holding `payload`: what a value may contain.
+std::string ForgedFragment(std::string_view payload) {
+  std::string fragment;
+  const char type = static_cast<char>(RecordType::kFull);
+  PutFixed32(fragment,
+             crc32c::Mask(crc32c::Extend(crc32c::Value(std::string_view(&type, 1)), payload)));
+  fragment.push_back(static_cast<char>(payload.size() & 0xFFU));
+  fragment.push_back(static_cast<char>(payload.size() >> 8U));
+  fragment.push_back(type);
+  fragment.append(payload);
+  return fragment;
+}
+
+// A crash tears a record whose value contains a valid fragment. The torn
+// record's payload is user data and is not searched: a torn tail, never
+// Corruption (which would keep the database from opening).
+TEST_F(LogTest, TornRecordWhosePayloadHoldsAValidFragmentIsATornTail) {
+  for (const std::string& inside : {ForgedFragment(""), ForgedFragment("hello")}) {
+    const std::string value = std::string(100, 'v') + inside + std::string(100, 'v');
+    const std::string log = WriteLog({"first", value});
+    const std::size_t first_end = kHeaderSize + 5;
+    for (std::size_t cut = first_end + 1; cut < log.size(); ++cut) {
+      const ReadResult result = ReadLog(std::string_view(log).substr(0, cut));
+      ASSERT_TRUE(result.status.ok()) << "cut at " << cut << ": " << result.status.ToString();
+      ASSERT_EQ(result.records, std::vector<std::string>{"first"}) << "cut at " << cut;
+      ASSERT_TRUE(result.tail.has_value()) << "cut at " << cut;
+    }
+  }
+}
+
+// The worst case of the above: a whole log stored as a value (in records
+// that span blocks). Every truncation of the outer log is still a torn tail.
+TEST_F(LogTest, EveryTruncationIsATornTailEvenWhenValuesAreLogs) {
+  const std::string inner = WriteLog({"a", "bb", std::string(40000, 'c'), "dddd"});
+  const std::vector<std::string> records = {"before", inner, inner.substr(0, 9000), "after"};
+  std::vector<std::size_t> ends;
+  for (std::size_t i = 1; i <= records.size(); ++i) {
+    ends.push_back(
+        WriteLog({records.begin(), records.begin() + static_cast<std::ptrdiff_t>(i)}).size());
+  }
+  const std::string log = WriteLog(records);
+  // Every cut would take minutes under sanitizers: every 97th, plus every
+  // cut near a record end or a block boundary.
+  for (std::size_t cut = 0; cut <= log.size(); ++cut) {
+    const bool near_end = std::ranges::any_of(
+        ends, [cut](std::size_t end) { return cut + 8 >= end && cut <= end + 8; });
+    const bool near_block = cut % kBlockSize < 8 || cut % kBlockSize > kBlockSize - 8;
+    if (cut % 97 != 0 && !near_end && !near_block) {
+      continue;
+    }
+    const ReadResult result = ReadLog(std::string_view(log).substr(0, cut));
+    ASSERT_TRUE(result.status.ok()) << "cut at " << cut << ": " << result.status.ToString();
+    const auto complete = static_cast<std::size_t>(
+        std::ranges::count_if(ends, [cut](std::size_t end) { return end <= cut; }));
+    ASSERT_EQ(result.records.size(), complete) << "cut at " << cut;
+    for (std::size_t i = 0; i < complete; ++i) {
+      ASSERT_EQ(result.records[i], records[i]) << "cut at " << cut;
+    }
+  }
+}
+
+// An intact-looking header whose length field was damaged: the CRC matches a
+// shorter payload, so the real fragment ended there and data follows it.
+TEST_F(LogTest, DamagedLengthIsCaughtByTheChecksum) {
+  std::string log = WriteLog({"aaaa", "bbbb"});
+  log[4] = static_cast<char>(4 + kHeaderSize);  // now swallows the next fragment's header
+  const ReadResult result = ReadLog(log);
+  EXPECT_TRUE(IsCorruption(result.status)) << result.status.ToString();
+  EXPECT_NE(result.status.ToString().find("length field damaged"), std::string::npos)
+      << result.status.ToString();
+  EXPECT_TRUE(result.records.empty());
+}
+
 // --- I/O errors ------------------------------------------------------------------------
 
 class FailingSequentialFile final : public SequentialFile {
