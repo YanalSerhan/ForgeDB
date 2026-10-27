@@ -224,10 +224,53 @@ length field is damaged and data follows, so it is mid-log corruption (ADR 0004,
 
 ## Table file (.sst): blocks, filter, index, footer
 
-A table file holds sorted, immutable key/value entries. It is made of blocks, each protected by a
-trailer: data blocks and the index block are in the "Block" format below, and the bloom filter is
-stored the same way. How the blocks are arranged in the file (the index and the footer) arrives
-with the table builder in Phase 3.3.
+Code: `src/table/table_format.*`, `src/table/table_builder.*`, `src/table/table.*`. Tests:
+`tests/unit/table_test.cpp`. Design: ADR 0006.
+
+A table file (`NNNNNN.sst`; see "Database directory") holds immutable entries sorted by internal
+key (see "Internal key"), each with a value; a deletion's value is empty. It is a sequence of
+blocks, each followed by a trailer (below), and a fixed-size footer:
+
+```
++--------------+---------+-----+--------------+---------+----------------+---------+--------------+
+| data block 0 | trailer | ... | filter block | trailer |  index block   | trailer | footer (48 B)|
++--------------+---------+-----+--------------+---------+----------------+---------+--------------+
+```
+
+- **Data blocks** ("Block" format, restart interval 16) hold the entries in order. A block is cut
+  after the entry that makes its contents reach 4096 bytes (the builder's `block_size`), so a block
+  is at least 4096 bytes, except the last, and an entry is never split.
+- **Filter block** (optional): the table's bloom filter (see "Bloom filter") stored as a block's
+  contents, over the user keys of all entries.
+- **Index block** ("Block" format, restart interval 1, keys compared as internal keys): one entry
+  per data block, in order. Key: the data block's *last* internal key. Value: the data block's
+  *block handle*, `varint64 offset | varint64 size` (the offset of its first byte in the file and
+  the size of its contents, without the trailer). The value must be exactly one handle.
+  The first index entry whose key is at or after a lookup key names the only data block that can
+  hold that key.
+- An empty table (no entries) is valid: no data blocks, an empty index block.
+
+**Footer** (the last 48 bytes of the file):
+
+```
++--------------+--------------+--------------+--------------+-------------+--------------+----------+
+| filter       | filter size  | index        | index size   | version:    | CRC: fixed32 | magic:   |
+| offset: f64  | : fixed64    | offset: f64  | : fixed64    | fixed32 = 1 | (masked)     | 8 bytes  |
++--------------+--------------+--------------+--------------+-------------+--------------+----------+
+ 0              8              16             24             32            36             40      48
+```
+
+- The handles have the same meaning as in the index; filter size `0` (with offset `0`) means the
+  table has no filter.
+- `CRC` is the masked CRC-32C of bytes 0-35. `magic` is the ASCII bytes `ForgeSST`.
+
+**Opening** a table checks, in order: the file is at least 48 bytes; the magic (else "not a
+ForgeDB table"); the footer CRC; the version (an unknown version is `NotSupported`, anything else
+wrong is `Corruption`); that the index block and its trailer end at or before the footer, and the
+filter block and its trailer (if any) at or before the index block. The index and filter blocks
+are then read and their trailers checked. A data block is read and checked when it is first
+needed; its handle must end at or before the first byte of the filter (or index) block. Every
+handle is checked against the file size before anything is allocated for it.
 
 ### Block trailer
 
@@ -265,8 +308,8 @@ entry:  varint32 shared | varint32 unshared | varint32 value size | key bytes [s
 
 - **Prefix compression.** An entry's key is the first `shared` bytes of the previous entry's key
   followed by the `unshared` bytes stored in the entry.
-- **Restart points.** Every 16th entry (the interval is a builder setting; the index block's is
-  chosen in Phase 3.3) starts a restart point: it stores its whole key (`shared = 0`), and its
+- **Restart points.** Every *interval*-th entry (16 in data blocks, 1 in the index block, so
+  every index entry) starts a restart point: it stores its whole key (`shared = 0`), and its
   offset is listed in the restart array. Entry 0 is always a restart point, so the first offset
   is `0`. A reader binary-searches the restart points' keys, then decodes forward.
 - Keys are in strictly increasing order of the block's comparison: internal keys (see

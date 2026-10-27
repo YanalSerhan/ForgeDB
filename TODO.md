@@ -227,20 +227,20 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - [x] Test: no false negatives ever; measured false-positive rate within expectations for 10 bits per key (1 to 10,000 keys: no false negatives, each size at most 2%; 100,000 keys: 0.817% measured on Linux against 0.82% predicted, fails above 1.2%)
 
 ### 3.3 Table format
-- [ ] `TableBuilder`: data blocks (~4 KiB), filter block, index block (last key of each data block → block handle), footer
-- [ ] Footer: fixed size, holds index and filter handles + a magic number
-- [ ] `TableReader`: open via `RandomAccessFile`, read and verify footer, index and filter
-- [ ] `Get`: bloom check first, then index lookup, then one data block
-- [ ] Two-level iterator (index iterator → data block iterator)
-- [ ] Document the byte layout in `docs/file-formats.md`
-- [ ] Unit tests: round-trip 100k keys, iterate, seek, missing keys, empty table rejected or handled
+- [x] `TableBuilder`: data blocks (~4 KiB), filter block, index block (last key of each data block → block handle), footer (settings in an internal `TableOptions`; the public `Options` gain them in 3.5; `Finish` does not sync or close)
+- [x] Footer: fixed size, holds index and filter handles + a magic number (48 bytes: four fixed64 handle fields, format version 1, masked CRC32C, magic `ForgeSST`)
+- [x] `TableReader`: open via `RandomAccessFile`, read and verify footer, index and filter (`Table::Open`; every handle checked against the file size before anything is allocated)
+- [x] `Get`: bloom check first, then index lookup, then one data block (100,000 missing keys: 845 data blocks read, 0.845%, measured on Linux)
+- [x] Two-level iterator (index iterator → data block iterator) (stops with `Corruption` at a bad block instead of skipping it)
+- [x] Document the byte layout in `docs/file-formats.md` (and ADR 0006, the table-format ADR from 3.10)
+- [x] Unit tests: round-trip 100k keys, iterate, seek, missing keys, empty table rejected or handled (handled: a valid empty table; plus versions across blocks, huge values, damaged footers, index, filter and data, every bit flip of a small table caught, write errors, concurrent Gets)
 
 ### 3.4 Caches
-- [ ] Table cache: open `TableReader`s keyed by file number, LRU by count
-- [ ] Block cache: sharded LRU (e.g., 16 shards), each with its own mutex, hash map and list; charged in bytes
-- [ ] Cache handles are reference-counted RAII objects; an entry in use is never freed
-- [ ] Stats: hits, misses, evictions
-- [ ] Concurrency test: many threads hitting the cache; ASan clean
+- [x] Table cache: open `TableReader`s keyed by file number, LRU by count (`src/db/table_cache.*`; iterators keep their table open after eviction)
+- [x] Block cache: sharded LRU (e.g., 16 shards), each with its own mutex, hash map and list; charged in bytes (`ShardedLruCache<T>` in `src/util/lru_cache.h`, shared by both caches; keys: a per-table cache id + block offset)
+- [x] Cache handles are reference-counted RAII objects; an entry in use is never freed (in-use entries sit on their own list; erased or replaced ones are freed by their last handle; handles hold a plain pointer and list iterators are touched only under the shard's mutex, because MSVC's debug iterators broke `TableCacheTest.ConcurrentLookups` in the debug presets when copied across threads, reproduced and fixed with libstdc++'s `_GLIBCXX_DEBUG`)
+- [x] Stats: hits, misses, evictions (plus charge and entries; tables also count filter rejections, block reads and cache hits)
+- [x] Concurrency test: many threads hitting the cache; ASan clean (16 threads on the LRU cache, 8 on a table, 8 on the table cache with constant eviction; ASan and TSan clean on Linux)
 
 ### 3.5 Flush to L0
 - [ ] Memtable switch when `ApproximateMemoryUsage()` passes `memtable_bytes`; a new log file per memtable (moved from 2.3)
@@ -272,7 +272,7 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - [ ] Fuzz targets: block parser, table footer, `VersionEdit` decoder
 
 ### 3.10 Docs
-- [ ] ADR: table format (block size, restart interval, one filter per table)
+- [x] ADR: table format (block size, restart interval, one filter per table): ADR 0006 (and ADR 0005 for the filter)
 - [ ] ADR: MANIFEST + `CURRENT` switch on Windows
 - [ ] README: architecture diagram, build steps, short feature list, current status
 

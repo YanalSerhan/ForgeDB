@@ -13,6 +13,7 @@ add_library(forgedb STATIC
   db/db_iter.cpp
   db/filename.cpp
   db/internal_key.cpp
+  db/table_cache.cpp
   db/version.cpp
   db/write_batch.cpp
   env/mem_file_system.cpp
@@ -26,6 +27,9 @@ add_library(forgedb STATIC
   table/block_builder.cpp
   table/block_format.cpp
   table/bloom_filter.cpp
+  table/table.cpp
+  table/table_builder.cpp
+  table/table_format.cpp
   util/check.cpp
   util/coding.cpp
   util/crc32c.cpp

@@ -30,10 +30,13 @@ add_executable(forgedb_unit_tests
   unit/hash_test.cpp
   unit/internal_key_test.cpp
   unit/log_test.cpp
+  unit/lru_cache_test.cpp
   unit/memtable_test.cpp
   unit/result_test.cpp
   unit/skip_list_test.cpp
   unit/status_test.cpp
+  unit/table_cache_test.cpp
+  unit/table_test.cpp
   unit/version_test.cpp
   unit/win_file_system_test.cpp
   unit/write_batch_test.cpp
