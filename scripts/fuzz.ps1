@@ -62,8 +62,10 @@ try {
         if (-not (Test-Path $exe)) { throw "No fuzz target named '$target' ($exe)" }
         $log = Join-Path $logDir "fuzz-$target.log"
         $timer = [Diagnostics.Stopwatch]::StartNew()
+        # The prefix ends in '/', not '\': a backslash right before a closing quote
+        # escapes the quote, and the rest of the command line becomes one argument.
         $command = "`"$exe`" -max_total_time=$Seconds -print_final_stats=1 " +
-                   "`"-artifact_prefix=$corpus\artifacts\`" `"$corpus\$target-work`" `"$corpus\$target`""
+                   "`"-artifact_prefix=$corpus\artifacts/`" `"$corpus\$target-work`" `"$corpus\$target`""
         $code = Invoke-Logged $command $log
         $runs = (Select-String -Path $log -Pattern 'stat::number_of_executed_units:\s+(\d+)' |
                  Select-Object -Last 1 | ForEach-Object { $_.Matches[0].Groups[1].Value })

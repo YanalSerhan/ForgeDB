@@ -202,15 +202,14 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 
 ### 2.7 Fuzzing
 - [x] `fuzz/fuzz_log_reader.cpp` (raw bytes; and a write / cut / read-back round trip that must return exactly the complete records) and `fuzz/fuzz_write_batch.cpp` (all-or-nothing decoding, re-encoding, memtable insert), with a seed corpus written by `forgedb_fuzz_seeds` (no binary files in git)
-- [x] Build with clang-cl `-fsanitize=fuzzer,address` (libFuzzer runtime linked by name, like the ASan runtime; the fuzz preset uses the static CRT, `/MT`, because that is the only build of libFuzzer LLVM 22 ships)
+- [x] Build with clang-cl `-fsanitize=fuzzer,address` (libFuzzer runtime linked by name, like the ASan runtime; the fuzz preset uses the static CRT, `/MT`, because that is the only build of libFuzzer LLVM 22 ships; that build also lacks the STL's ASan container annotations, so fuzz builds define `_DISABLE_STRING_ANNOTATION` and `_DISABLE_VECTOR_ANNOTATION`)
 - [x] Enable the CI fuzz smoke job: `ctest --preset clangcl-fuzz` runs each target for 60 s (`FORGEDB_FUZZ_SMOKE_SECONDS`), so the existing `clangcl-fuzz` CI job runs it through `build-all.ps1`; long runs: `scripts\fuzz.ps1`
 - [x] Fuzzing found a recovery bug: a record whose value contains the bytes of a valid log fragment, torn by a crash, made the open fail with `Corruption` (ADR 0004's search for later valid data looked inside the torn record's own payload). Fixed (approved): an intact fragment's own payload is not searched; its CRC decides whether its length field is damaged (ADR 0004, rule 5). New tests in `log_test.cpp` and `CrashTortureTest.ValuesContainingLogFragments`
 
 ### ✅ Exit gate — Phase 2
 - [x] 10,000 crash-torture iterations with zero lost synced writes and zero recovery failures: Windows, `msvc-release`, `FORGEDB_CRASH_CYCLES=3334` (3 seeds): 10,002 cycles in each of the 6 variants, all passed, 0 refused opens except the zero-filled-pages variant (304 of 10,002; deferred to 3.6, never wrong data). Identical counts on Linux (seeds are compiler-independent)
 - [x] 500 process-kill runs pass: Windows, `msvc-release`, `FORGEDB_KILL_RUNS=500`: 100,218 acknowledged keys checked, none lost (47 kills before the first write, 430 between a write and its side-file line)
-- [ ] Each fuzz target ran 1 hour locally with no crashes and no ASan reports (Windows: `scripts\fuzz.ps1`)
-  - Linux (clang 18, libFuzzer): 1 hour each, no crashes, no ASan reports: `log_reader` 3,409,344 inputs, `write_batch` 128,609,809 inputs. Windows run pending: LLVM 22 ships libFuzzer for the static CRT only, so the `clangcl-fuzz` preset now builds with `/MT` (ASan entered through its static-CRT thunk)
+- [x] Each fuzz target ran 1 hour locally with no crashes and no ASan reports: Windows, `clangcl-fuzz` (`scripts\fuzz.ps1`, clang-cl 22, `/MT`, no STL container annotations): `log_reader` 3,527,222 inputs, `write_batch` 87,982,458 inputs, 3,601 s each, no crash artifacts. Also on Linux (clang 18): `log_reader` 3,409,344 inputs, `write_batch` 128,609,809 inputs, both clean
 
 ---
 
