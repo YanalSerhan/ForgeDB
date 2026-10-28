@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Long fuzzing runs (TODO 2.7; Phase 2 exit gate: 1 hour per target, no crashes, no ASan reports).
+  Long fuzzing runs (TODO 2.7 and 3.9; exit gates: 1 hour per target, no crashes, no ASan reports).
 
 .DESCRIPTION
   Configures and builds the clangcl-fuzz preset, writes the seed corpus, then runs each fuzz
@@ -17,7 +17,7 @@
 [CmdletBinding()]
 param(
     [int] $Seconds = 3600,
-    [string[]] $Targets = @('log_reader', 'write_batch'),
+    [string[]] $Targets = @('log_reader', 'write_batch', 'block', 'table', 'version_edit'),
     [string] $VcpkgRoot
 )
 

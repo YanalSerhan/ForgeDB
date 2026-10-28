@@ -193,7 +193,7 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - [x] Bug found and fixed: data recovered from a log was never synced, so a later power loss could drop an old log's tail while newer synced writes survived (a hole; the next open failed with a sequence gap). Open now syncs every replayed log before creating the new one (new `FileSystem::SyncFile`; ADR 0002 rule 13)
 - [x] Bug found and fixed in the 2.4 model: a simulated process crash made every file durable; now unsynced data stays at risk of a later power loss
 - [x] Ran with `zero_pages_in_unsynced_tail` (decision from 2.4): ADR 0004's strict rule then refuses some opens with `Corruption` (17 of 600 cycles in the first run). Decided in 2.5: cure deferred to 3.6; until then the test checks the weaker promise (a correct prefix or `Corruption`, never wrong data)
-- [ ] Renames and removals: once Phase 3.6 uses them, run with the default (not durable) and settle ADR 0002's open question
+- [x] Renames and removals: once Phase 3.6 uses them, run with the default (not durable) and settle ADR 0002's open question (settled in 3.6: ADR 0007, option B; every crash test runs with renames and removals that may be undone)
 
 ### 2.6 Process-kill test (real crash, Windows)
 - [x] `tests/crash/crash_child.exe` (`forgedb_crash_child`): writes keys with `sync = true` (batches of 1-5 keys), appends each acknowledged key to a side file (flushed to the OS, so a kill cannot lose it)
@@ -245,7 +245,7 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 ### 3.5 Flush to L0
 - [x] Memtable switch when `ApproximateMemoryUsage()` passes `memtable_bytes`; a new log file per memtable (moved from 2.3) (the old log is synced first, so only the newest log can lose unsynced writes; the flush runs in the writing thread until 4.2; new `Options`: `memtable_bytes`, `block_cache_bytes`, `max_open_tables`, `filter_bits_per_key`, `block_size`, checked at open)
 - [x] Immutable memtable → `TableBuilder` → new `.sst` file → `Sync` → close (readers keep reading the immutable memtable until the table is installed)
-- [x] Old log deleted only after the new table is recorded in the MANIFEST and synced (a failed flush is the sticky write error; nothing is lost: `FlushFailureTest`)
+- [x] Old log deleted only after the new table is recorded in the MANIFEST and synced (a failed flush is the sticky write error; nothing is lost: `FlushFailureTest`). *Amended in 3.9 (approved):* deleted only after the **next** MANIFEST record, because a damaged last record is ignored like a torn write and its data must still be in a log (ADR 0007 rule 5; `ManifestDamageTest`)
 
 ### 3.6 MANIFEST and versions
 - [x] `VersionEdit`: log number, next file number, last sequence, added files (level, number, size, smallest and largest key), deleted files; encode/decode with tags (strict decoder: unknown tags, repeats, bad keys and levels are `Corruption`)
@@ -263,19 +263,19 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - [x] `Get` path: memtable → immutable → L0 newest first → one file per deeper level (deeper levels stay empty until Phase 4 compaction)
 
 ### 3.8 Tools
-- [ ] `sst_dump`: print a table's footer, index, filter stats and entries
-- [ ] `forgedb_cli`: `put`, `get`, `delete`, `scan`, `stats` from the command line
+- [x] `sst_dump`: print a table's footer, index, filter stats and entries (`forgedb_sst_dump [--blocks] [--entries]`; also checks every block's CRC, key order, index keys and the filter, and goes on past a damaged data block; exit code 1 on damage)
+- [x] `forgedb_cli`: `put`, `get`, `delete`, `scan`, `stats` from the command line (`stats`: tables per level, last sequence, and what recovery found; logic in the `forgedb_tools` library, tested on `MemFileSystem`; Win32 only in `env/`)
 
 ### 3.9 Tests
 - [x] Model test now runs with a small `memtable_bytes` so data constantly flushes to tables (`AgreesWithStdMapAcrossFlushes`: the memtable is sized for about 100 flushes per run, since every level-0 table slows reads until compaction; ~80 tables per seed at 20,000 operations)
 - [x] Crash torture extended: crashes during flush and during the `CURRENT` switch (`CrashTortureTest.CrashesDuringFlushes` and `...WithInjectedErrors`; `FlushCrashTest` crashes at every operation of a flush and of an open; the process-kill child uses a 64 KiB memtable)
-- [ ] Corruption tests: flip random bits in `.sst`, `.log` and MANIFEST files; every read returns correct data or a corruption status, never wrong data, never a crash
-- [ ] Fuzz targets: block parser, table footer, `VersionEdit` decoder
+- [x] Corruption tests: flip random bits in `.sst`, `.log` and MANIFEST files; every read returns correct data or a corruption status, never wrong data, never a crash (`forgedb_corruption_tests`: bit flips, random and zeroed runs, truncations; the open fails with `Corruption`, or yields the state after some prefix of the writes, short only for damage to the newest log and then reported, except a cut exactly at a record boundary, which no log format can tell from a log that ended there). It found two bugs, fixed: a MANIFEST past 32 KiB could not be read back (the writer for edits after the snapshot counted block offsets from 0; `VersionSetTest.ManifestsSpanningManyLogBlocks`), and the damaged-last-edit gap above
+- [x] Fuzz targets: block parser, table footer, `VersionEdit` decoder (`fuzz_block`, `fuzz_table`: raw files, and built tables with one damaged byte or a cut that must read back right or `Corruption`; `fuzz_version_edit`: decoding, and MANIFEST recovery with a snapshot round trip. Seen while writing it, not found by a run: file numbers near 2^64 in a damaged MANIFEST could wrap the counter around to numbers in use; numbers from 2^63 on are now refused with `NotSupported`, `VersionSetTest.ExhaustedFileNumbersAreRefused`)
 
 ### 3.10 Docs
 - [x] ADR: table format (block size, restart interval, one filter per table): ADR 0006 (and ADR 0005 for the filter)
 - [x] ADR: MANIFEST + `CURRENT` switch on Windows: ADR 0007 (and ADR 0002's open question closed, option B)
-- [ ] README: architecture diagram, build steps, short feature list, current status
+- [x] README: architecture diagram, build steps, short feature list, current status (plus tools, known limitations, measured numbers with where they were measured)
 
 ### ✅ Exit gate — Phase 3 (minimum CV-worthy engine)
 - [ ] Data survives clean restarts and simulated crashes with flushes in progress
@@ -396,4 +396,4 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - [ ] Database paths are limited to MAX_PATH unless Windows long paths are enabled
 - [ ] Real damage (not a crash) in the newest log drops the writes after it instead of failing the open (point-in-time, reported in `RecoveryInfo`; ADR 0004 rule 6)
 - [ ] Until compaction (Phase 4), every flush and every open with unflushed writes adds a level-0 table, and reads consider every level-0 table
-- [ ] Until Phase 3.6: if a power loss leaves unsynced log pages written out of order (undocumented whether NTFS can), the open may fail with `Corruption` instead of dropping the unsynced writes (ADR 0004; measured in 2.5)
+- [ ] A newest log truncated exactly at a record boundary looks like a log whose last writes never reached the disk: those writes are lost without a report (found by the corruption suite, 3.9)

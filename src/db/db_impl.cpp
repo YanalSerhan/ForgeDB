@@ -452,7 +452,7 @@ DBImpl::Group DBImpl::BuildGroup() {
   return group;
 }
 
-SequenceNumber DBImpl::LastSequenceForTesting() {
+SequenceNumber DBImpl::LastSequence() {
   const std::scoped_lock lock(mutex_);
   return last_sequence_;
 }
@@ -467,7 +467,7 @@ std::uint64_t DBImpl::FlushesForTesting() {
   return flushes_;
 }
 
-std::shared_ptr<const Version> DBImpl::CurrentVersionForTesting() {
+std::shared_ptr<const Version> DBImpl::CurrentVersion() {
   const std::scoped_lock lock(mutex_);
   return version_;
 }
@@ -526,10 +526,18 @@ Status DBImpl::MakeRoomForWrite(std::unique_lock<std::mutex>& lock) {
   imm_.Reset();
   ++flushes_;
 
-  // 3. The old log is now redundant. If this fails, the next open deletes it.
-  lock.unlock();
-  static_cast<void>(file_system_->RemoveFile(LogFileName(name_, old_log)));
-  lock.lock();
+  // 3. The old log is redundant now, but is kept until the next MANIFEST
+  //    record is synced: if this edit, the MANIFEST's last record, is later
+  //    damaged, recovery cannot tell it from a torn write and ignores it, and
+  //    then replays the old log instead (ADR 0007). The log this flush's
+  //    predecessor retired is deleted now; if that fails, the next open
+  //    deletes it.
+  const std::optional<std::uint64_t> obsolete_log = std::exchange(retired_log_, old_log);
+  if (obsolete_log) {
+    lock.unlock();
+    static_cast<void>(file_system_->RemoveFile(LogFileName(name_, *obsolete_log)));
+    lock.lock();
+  }
   return Status::OK();
 }
 

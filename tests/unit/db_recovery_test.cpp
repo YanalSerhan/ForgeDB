@@ -51,12 +51,8 @@ class RecoveryTest : public testing::Test {
     return db.ok() ? std::move(db).value() : nullptr;
   }
 
-  static const RecoveryInfo& Info(DB& db) {
-    return dynamic_cast<DBImpl&>(db).RecoveryInfoForTesting();
-  }
-  static SequenceNumber LastSequence(DB& db) {
-    return dynamic_cast<DBImpl&>(db).LastSequenceForTesting();
-  }
+  static const RecoveryInfo& Info(DB& db) { return dynamic_cast<DBImpl&>(db).GetRecoveryInfo(); }
+  static SequenceNumber LastSequence(DB& db) { return dynamic_cast<DBImpl&>(db).LastSequence(); }
 
   std::string FileContents(const std::filesystem::path& path) {
     const std::unique_ptr<SequentialFile> file = std::move(fs_->NewSequentialFile(path)).value();
@@ -158,7 +154,7 @@ TEST_F(RecoveryTest, SeveralSessionsReplayInOrderAndSequencesContinue) {
   EXPECT_EQ(Scan(*db), "key=session 3 s1=x s2=x s3=x ");
   // Only the last session's log is left; the others are in tables 3, 6, 9.
   EXPECT_EQ(Info(*db).logs_replayed, std::vector<std::uint64_t>({7}));
-  EXPECT_EQ(dynamic_cast<DBImpl&>(*db).CurrentVersionForTesting()->files[0].size(), 3U);
+  EXPECT_EQ(dynamic_cast<DBImpl&>(*db).CurrentVersion()->files[0].size(), 3U);
   EXPECT_EQ(LastSequence(*db), 6U);
 }
 

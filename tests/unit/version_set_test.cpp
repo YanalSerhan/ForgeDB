@@ -141,6 +141,41 @@ TEST_F(VersionSetTest, LogAndApplyIsRecovered) {
   EXPECT_EQ(r.versions->Current()->files[0][0].number, 6U);
 }
 
+// A MANIFEST longer than one 32 KiB log block: the edits after the snapshot
+// must still be placed by the log's block rules. (Found by the corruption
+// suite: the writer for later edits started counting at 0 after the
+// snapshot, so the first record to cross a block boundary was unreadable.)
+TEST_F(VersionSetTest, ManifestsSpanningManyLogBlocks) {
+  constexpr int kEdits = 500;  // ~230 bytes each: about 3.5 blocks
+  const std::string long_key(200, 'k');
+  {
+    const Recovered r = Recover();
+    ASSERT_TRUE(r.status.ok());
+    VersionEdit snapshot;
+    snapshot.added_files.push_back(
+        {.level = 0, .file = MakeTable(r.versions->NewFileNumber(), 1, long_key, long_key)});
+    ASSERT_TRUE(r.versions->StartNewManifest(snapshot).ok());
+    for (int i = 0; i < kEdits; ++i) {
+      VersionEdit flush;
+      flush.added_files.push_back(
+          {.level = 0,
+           .file = MakeTable(r.versions->NewFileNumber(), 1, long_key + std::to_string(i),
+                             long_key + std::to_string(i))});
+      flush.last_sequence = static_cast<SequenceNumber>(i + 1);
+      ASSERT_TRUE(r.versions->LogAndApply(flush).ok()) << i;
+    }
+    ASSERT_GT(
+        std::move(fs_.GetFileSize(DescriptorFileName(db_, r.versions->ManifestNumber()))).value(),
+        3U * 32768U);
+  }
+  const Recovered r = Recover();
+  ASSERT_TRUE(r.status.ok()) << r.status.ToString();
+  EXPECT_EQ(r.info.edits_applied, std::uint64_t{kEdits} + 1);
+  EXPECT_FALSE(r.info.torn_tail.has_value());
+  EXPECT_EQ(r.versions->Current()->files[0].size(), std::size_t{kEdits} + 1);
+  EXPECT_EQ(r.versions->LastSequence(), std::uint64_t{kEdits});
+}
+
 TEST_F(VersionSetTest, LevelZeroIsNewestFirst) {
   const Recovered r = Recover();
   ASSERT_TRUE(r.status.ok());
@@ -267,6 +302,36 @@ TEST_F(VersionSetTest, AFirstRecordThatIsNotASnapshotIsCorruption) {
   const Recovered r = Recover();
   EXPECT_EQ(r.status.code(), Status::Code::kCorruption);
   EXPECT_NE(r.status.ToString().find("not a full snapshot"), std::string::npos);
+}
+
+// The file-number counter must never wrap around to numbers in use: numbers
+// from 2^63 on, in the MANIFEST or in a file name, are refused.
+TEST_F(VersionSetTest, ExhaustedFileNumbersAreRefused) {
+  {
+    const std::unique_ptr<WritableFile> file =
+        std::move(fs_.NewWritableFile(DescriptorFileName(db_, 5))).value();
+    log::Writer writer(file.get());
+    VersionEdit snapshot;
+    snapshot.log_number = 1;
+    snapshot.next_file_number = std::uint64_t{1} << 63U;
+    snapshot.last_sequence = 0;
+    std::string record;
+    snapshot.EncodeTo(record);
+    ASSERT_TRUE(writer.AddRecord(record).ok());
+    ASSERT_TRUE(file->Close().ok());
+  }
+  Recovered r = Recover();
+  EXPECT_EQ(r.status.code(), Status::Code::kNotSupported) << r.status.ToString();
+
+  ASSERT_TRUE(fs_.RemoveFile(DescriptorFileName(db_, 5)).ok());
+  WriteFile(TableFileName(db_, std::uint64_t{1} << 63U), "");  // an unlisted leftover
+  r = Recover();
+  EXPECT_EQ(r.status.code(), Status::Code::kNotSupported) << r.status.ToString();
+
+  ASSERT_TRUE(fs_.RemoveFile(TableFileName(db_, std::uint64_t{1} << 63U)).ok());
+  WriteFile(TableFileName(db_, (std::uint64_t{1} << 63U) - 1), "");
+  r = Recover();
+  EXPECT_TRUE(r.status.ok()) << r.status.ToString();
 }
 
 TEST_F(VersionSetTest, AMissingOrResizedTableIsCorruption) {

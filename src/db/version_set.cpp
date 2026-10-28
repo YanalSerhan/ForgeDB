@@ -248,9 +248,14 @@ Status VersionSet::Recover(const std::vector<std::string>& children, ManifestRec
     }
   }
   // Never reuse a number found in the directory (e.g. a table left by a
-  // flush that crashed before its edit was written).
-  if (highest_number == UINT64_MAX) {
-    return Status::NotSupported("file numbers exhausted");
+  // flush that crashed before its edit was written). Numbers from 2^63 on
+  // never come from ForgeDB (a file per nanosecond would take 290 years), so
+  // they are refused: the counter can then never wrap around to numbers in
+  // use.
+  constexpr std::uint64_t kFileNumberLimit = std::uint64_t{1} << 63U;
+  if (highest_number >= kFileNumberLimit || next_file_number_ >= kFileNumberLimit) {
+    return Status::NotSupported("file numbers exhausted",
+                                "a file number or the MANIFEST's next file number is 2^63 or more");
   }
   next_file_number_ = std::max(next_file_number_, highest_number + 1);
   return Status::OK();
@@ -263,6 +268,9 @@ Status VersionSet::StartNewManifest(const VersionEdit& edit) {
 
   FORGEDB_ASSIGN_OR_RETURN(std::unique_ptr<WritableFile> file,
                            fs_->NewWritableFile(DescriptorFileName(db_dir_, number)));
+  // The same writer appends every later edit: it tracks where the current
+  // 32 KiB block ends (a writer started after the snapshot would place
+  // fragments across block boundaries once the MANIFEST passes 32 KiB).
   log::Writer writer(file.get());
   std::string record;
   Snapshot(*version).EncodeTo(record);
@@ -285,7 +293,7 @@ Status VersionSet::StartNewManifest(const VersionEdit& edit) {
     static_cast<void>(manifest_file_->Close());
   }
   manifest_file_ = std::move(file);
-  manifest_log_.emplace(manifest_file_.get());
+  manifest_log_.emplace(writer);  // points at the file, which moved without changing address
   manifest_number_ = number;
   current_ = std::move(version);
   return Status::OK();

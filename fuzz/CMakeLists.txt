@@ -5,6 +5,9 @@
 #
 #   forgedb_fuzz_log_reader    the write-ahead log reader on untrusted bytes
 #   forgedb_fuzz_write_batch   write batch decoding on untrusted bytes
+#   forgedb_fuzz_block         the table block parser (TODO 3.9)
+#   forgedb_fuzz_table         table files: footer, index, filter, data blocks (TODO 3.9)
+#   forgedb_fuzz_version_edit  version edits and MANIFEST recovery (TODO 3.9)
 #   forgedb_fuzz_seeds         writes the seed corpus (no binary files in git)
 #
 # `ctest --preset clangcl-fuzz` writes the corpus and runs each target for
@@ -35,6 +38,9 @@ endfunction()
 
 forgedb_add_fuzzer(forgedb_fuzz_log_reader fuzz_log_reader.cpp)
 forgedb_add_fuzzer(forgedb_fuzz_write_batch fuzz_write_batch.cpp)
+forgedb_add_fuzzer(forgedb_fuzz_block fuzz_block.cpp)
+forgedb_add_fuzzer(forgedb_fuzz_table fuzz_table.cpp)
+forgedb_add_fuzzer(forgedb_fuzz_version_edit fuzz_version_edit.cpp)
 
 add_executable(forgedb_fuzz_seeds make_seed_corpus.cpp)
 target_link_libraries(forgedb_fuzz_seeds PRIVATE forgedb::forgedb)
@@ -48,7 +54,7 @@ set(_corpus "${CMAKE_CURRENT_BINARY_DIR}/corpus")
 add_test(NAME FuzzSeedCorpus COMMAND forgedb_fuzz_seeds "${_corpus}")
 set_tests_properties(FuzzSeedCorpus PROPERTIES FIXTURES_SETUP forgedb_fuzz_corpus)
 math(EXPR _timeout "${FORGEDB_FUZZ_SMOKE_SECONDS} + 300")
-foreach(target IN ITEMS log_reader write_batch)
+foreach(target IN ITEMS log_reader write_batch block table version_edit)
   add_test(NAME Fuzz.${target}
     COMMAND forgedb_fuzz_${target}
       -max_total_time=${FORGEDB_FUZZ_SMOKE_SECONDS}

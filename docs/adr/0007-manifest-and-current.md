@@ -42,9 +42,15 @@ Byte layouts: `docs/file-formats.md`, "Version edit" and "MANIFEST and CURRENT".
      is a torn tail and is ignored (its flush never completed, and its log was not deleted).
    - CURRENT is read only as a hint and a consistency check: if it names a MANIFEST that exists
      but is incomplete, or if CURRENT exists and no MANIFEST is complete, that is `Corruption`.
-5. **Files are deleted only after the MANIFEST that makes them obsolete is synced**: old logs
-   after the flush's edit, and, at open, after the new MANIFEST and CURRENT: older logs and
-   MANIFESTs, unlisted tables (a flush that crashed before its edit) and `CURRENT.tmp`.
+5. **Files are deleted only after the MANIFEST that makes them obsolete is synced**, and a log
+   only once another record follows the edit that retired it. A flush's log is deleted after the
+   *next* flush's edit is synced, not its own (amended in Phase 3.9): while an edit is the
+   MANIFEST's last record, damage to it (a bit flip, a truncation) looks exactly like a write cut
+   short and is ignored by rule 4, so the writes it records must still be in a log. The cost is
+   one extra log of at most `memtable_bytes` on disk. At open, after the new MANIFEST and CURRENT,
+   the open deletes older logs and MANIFESTs, unlisted tables (a flush that crashed before its
+   edit, or one whose edit was ignored) and `CURRENT.tmp`; the new MANIFEST's only record is its
+   snapshot, and damage to that fails the open (rule 4), so no log needs keeping.
 6. **Recovery checks every listed table** exists with the recorded size before opening.
 7. **The next file number** is above every file number in the directory, so a leftover file is
    never overwritten by a new one with its number.
@@ -72,16 +78,21 @@ them. Whether the rename of CURRENT survived does not matter.
 
 - An open costs: listing the directory, reading the chosen MANIFEST (and the first record of any
   newer, incomplete one), replaying the newest logs, writing a table if anything was recovered,
-  a new log, a new MANIFEST, `CURRENT.tmp`, a rename and the deletions. About 27 file operations
+  a new log, a new MANIFEST, `CURRENT.tmp`, a rename and the deletions. About 28 file operations
   for a small database (measured by `FlushCrashTest.ACrashAtAnyStepOfAnOpenLosesNothing`).
 - Each open with unflushed writes adds a level-0 table, and nothing merges level-0 tables until
   compaction (Phase 4). Reads consider every level-0 table until then.
 - Tested on the fault-injection file system with renames and removals that may be undone:
-  `FlushCrashTest` crashes at every operation of a flush (524 operations for 120 writes with 2
-  flushes) and of an open (27), each followed by a power loss and by a process crash;
+  `FlushCrashTest` crashes at every operation of a flush (523 operations for 120 writes with 2
+  flushes) and of an open (28), each followed by a power loss and by a process crash;
   `CrashTortureTest.CrashesDuringFlushes` and `...WithInjectedErrors`;
   `RecoveryDurabilityTest.UndoneCurrentSwitchIsHarmless`; `tests/unit/version_set_test.cpp`
   covers every MANIFEST-selection rule.
+- Rule 5's kept log: `ManifestDamageTest.DamageToTheLastRecordLosesNothing` flips every byte of
+  the last flush's record, and truncates it at every length, and reopens with nothing lost.
+  Without the kept log, each of those opens failed with `Corruption` (sequence numbers missing
+  between the MANIFEST and the newest log). The corruption suite (`tests/corruption`) damages
+  MANIFESTs at random.
 - Not testable on real hardware: whether a power loss can revert the rename. Option B makes the
   answer irrelevant to correctness.
 

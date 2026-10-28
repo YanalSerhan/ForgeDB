@@ -11,6 +11,7 @@
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -119,10 +120,11 @@ TEST_F(FlushTest, FullMemtablesAreFlushedAndEverythingStaysReadable) {
   }
   const std::uint64_t flushes = Impl(*db).FlushesForTesting();
   EXPECT_GE(flushes, 10U) << "1000 writes of ~220 bytes into 16 KiB memtables";
-  EXPECT_EQ(Impl(*db).CurrentVersionForTesting()->files[0].size(), flushes);
+  EXPECT_EQ(Impl(*db).CurrentVersion()->files[0].size(), flushes);
   EXPECT_EQ(Files(FileType::kTable).size(), flushes);
-  // Each flush deleted the log it replaced: only the current one is left.
-  EXPECT_EQ(Files(FileType::kLog).size(), 1U);
+  // The current log and the one the last flush retired, kept until the next
+  // MANIFEST record (ADR 0007); each flush deleted the one before.
+  EXPECT_EQ(Files(FileType::kLog).size(), 2U);
   EXPECT_EQ(Files(FileType::kDescriptor).size(), 1U);
 
   for (int i = 0; i < 1000; ++i) {
@@ -184,7 +186,7 @@ TEST_F(FlushTest, ReopenAfterFlushes) {
     }
   }
   const std::unique_ptr<DB> db = Open();
-  const RecoveryInfo& info = Impl(*db).RecoveryInfoForTesting();
+  const RecoveryInfo& info = Impl(*db).GetRecoveryInfo();
   EXPECT_EQ(info.logs_replayed.size(), 1U) << "only the log written since the last flush";
   for (int i = 0; i < 500; ++i) {
     ASSERT_EQ(Get(*db, Key(i)), Value(i)) << i;
@@ -317,6 +319,104 @@ TEST(FlushFailureTest, AFailedFlushRefusesWritesAndLosesNothing) {
     const std::unique_ptr<DB> db = std::move(OpenDB(SmallMemtable(), "db", fs)).value();
     for (int i = 0; i < written; ++i) {
       ASSERT_EQ(Get(*db, Key(i)), Value(i)) << i;
+    }
+  }
+}
+
+// --- Damage to the MANIFEST's last record ----------------------------------------
+//
+// A flush's MANIFEST record stays the last one until the next flush. If it is
+// damaged later (a bit flip, a truncation), recovery cannot tell it from a
+// write cut short and ignores it (ADR 0007). The flush's table is then
+// unlisted, so its data must still be in a log: the log the flush retired is
+// kept until the next MANIFEST record. Every byte of the record is damaged in
+// turn, and every truncation of it is tried; nothing may be lost.
+
+std::string ReadAll(FileSystem& fs, const std::filesystem::path& path) {
+  const std::unique_ptr<SequentialFile> file = std::move(fs.NewSequentialFile(path)).value();
+  std::string contents;
+  std::string buffer(4096, '\0');
+  while (true) {
+    const std::size_t read = std::move(file->Read(std::span<char>(buffer))).value();
+    if (read == 0) {
+      return contents;
+    }
+    contents.append(buffer, 0, read);
+  }
+}
+
+void Overwrite(FileSystem& fs, const std::filesystem::path& path, std::string_view contents) {
+  const std::unique_ptr<WritableFile> file = std::move(fs.NewWritableFile(path)).value();
+  ASSERT_TRUE(file->Append(contents).ok());
+  ASSERT_TRUE(file->Close().ok());
+}
+
+// A database whose MANIFEST ends with the record of its third flush. The new
+// log holds the write that set the flush off and `writes_after` more. (Were
+// the retired log deleted, the open would fail: that log's sequence numbers
+// would be missing between the MANIFEST and the new log.)
+struct FlushedDatabase {
+  std::shared_ptr<MemFileSystem> fs = std::make_shared<MemFileSystem>();
+  std::filesystem::path manifest;
+  std::uint64_t last_record = 0;  // where the last flush's record starts
+  int written = 0;
+};
+
+FlushedDatabase BuildFlushedDatabase(int writes_after) {
+  FlushedDatabase built;
+  const std::unique_ptr<DB> db = std::move(OpenDB(SmallMemtable(), "db", built.fs)).value();
+  built.manifest = DescriptorFileName("db", Impl(*db).GetRecoveryInfo().new_manifest_number);
+  std::uint64_t flushes = 0;
+  while (flushes < 3) {
+    const std::uint64_t size = std::move(built.fs->GetFileSize(built.manifest)).value();
+    EXPECT_TRUE(db->Put({}, Key(built.written), Value(built.written)).ok());
+    ++built.written;
+    if (Impl(*db).FlushesForTesting() != flushes) {
+      flushes = Impl(*db).FlushesForTesting();
+      built.last_record = size;
+    }
+  }
+  for (int i = 0; i < writes_after; ++i) {
+    EXPECT_TRUE(db->Put({}, Key(built.written), Value(built.written)).ok());
+    ++built.written;
+  }
+  return built;
+}
+
+void ExpectAllThere(const FlushedDatabase& built) {
+  const Result<std::unique_ptr<DB>> db = OpenDB(SmallMemtable(), "db", built.fs);
+  ASSERT_TRUE(db.ok()) << db.status().ToString();
+  EXPECT_TRUE(Impl(**db).GetRecoveryInfo().manifest.torn_tail.has_value())
+      << "the damaged record is ignored as a torn tail";
+  for (int i = 0; i < built.written; ++i) {
+    ASSERT_EQ(Get(**db, Key(i)), Value(i)) << i;
+  }
+}
+
+TEST(ManifestDamageTest, DamageToTheLastRecordLosesNothing) {
+  for (const int writes_after : {0, 10}) {
+    const std::uint64_t size = [&] {
+      const FlushedDatabase built = BuildFlushedDatabase(writes_after);
+      return std::move(built.fs->GetFileSize(built.manifest)).value();
+    }();
+    const std::uint64_t first = BuildFlushedDatabase(writes_after).last_record;
+    ASSERT_GT(size, first);
+    for (std::uint64_t offset = first; offset < size; ++offset) {
+      SCOPED_TRACE("writes after the flush: " + std::to_string(writes_after) +
+                   ", byte flipped at " + std::to_string(offset));
+      const FlushedDatabase built = BuildFlushedDatabase(writes_after);
+      std::string contents = ReadAll(*built.fs, built.manifest);
+      contents[offset] = static_cast<char>(contents[offset] ^ 0x20);
+      Overwrite(*built.fs, built.manifest, contents);
+      ExpectAllThere(built);
+    }
+    for (std::uint64_t length = first + 1; length < size; ++length) {
+      SCOPED_TRACE("writes after the flush: " + std::to_string(writes_after) + ", truncated to " +
+                   std::to_string(length));
+      const FlushedDatabase built = BuildFlushedDatabase(writes_after);
+      const std::string contents = ReadAll(*built.fs, built.manifest);
+      Overwrite(*built.fs, built.manifest, std::string_view(contents).substr(0, length));
+      ExpectAllThere(built);
     }
   }
 }
@@ -454,7 +554,7 @@ TEST_F(FlushTest, OpenDeletesFilesTheManifestDoesNotNeed) {
 
   const std::unique_ptr<DB> db = Open();
   EXPECT_EQ(Get(*db, "k"), "v");
-  const RecoveryInfo& info = Impl(*db).RecoveryInfoForTesting();
+  const RecoveryInfo& info = Impl(*db).GetRecoveryInfo();
   for (const std::string_view gone :
        {"000050.sst", "MANIFEST-000001", "000001.log", "MANIFEST-000002"}) {
     EXPECT_NE(std::ranges::find(info.files_deleted, gone), info.files_deleted.end()) << gone;

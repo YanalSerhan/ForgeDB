@@ -380,7 +380,7 @@ class Torture {
 
   std::string CheckRecovery() {
     auto& impl = dynamic_cast<DBImpl&>(*db_);
-    const RecoveryInfo& info = impl.RecoveryInfoForTesting();
+    const RecoveryInfo& info = impl.GetRecoveryInfo();
     const bool torn_newest = std::ranges::any_of(info.torn_tails, [&](const auto& tail) {
       return !info.logs_replayed.empty() && tail.log_number == info.logs_replayed.back();
     });
@@ -390,7 +390,7 @@ class Torture {
                             [](const auto& tail) { return tail.valid_data_dropped; })
             ? 1U
             : 0U;
-    const SequenceNumber sequence = impl.LastSequenceForTesting();
+    const SequenceNumber sequence = impl.LastSequence();
     const State actual = ReadAll(*db_);
 
     // Find the prefix: j writes replayed means the sequence advanced by the

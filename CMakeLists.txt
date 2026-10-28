@@ -52,6 +52,11 @@ include(ForgeDBCompilerOptions)
 include(ForgeDBSanitizers)
 
 add_subdirectory(src)
+# The command-line tools (sst_dump, cli). Not in the fuzz build, which builds
+# only the library and the fuzz targets.
+if(NOT FORGEDB_SANITIZE STREQUAL "fuzzer")
+  add_subdirectory(tools)
+endif()
 
 if(FORGEDB_BUILD_TESTS)
   enable_testing()

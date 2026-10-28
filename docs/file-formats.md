@@ -44,8 +44,9 @@ Code: `src/db/filename.*`, `OpenDB` in `src/db/db_impl.cpp`. Tests: `tests/unit/
   the directory.
 - **Flush (Phase 3.5).** When the memtable reaches `Options::memtable_bytes`, the current log is
   synced and a new one started; the old memtable is written to a new table (synced), a version
-  edit adding it and naming the new log is appended to the MANIFEST (synced), and only then is the
-  old log deleted.
+  edit adding it and naming the new log is appended to the MANIFEST (synced). The old log is
+  deleted after the *next* flush's edit is synced (or by the next open), so that the data of a
+  MANIFEST's last record is always still in a log (ADR 0007, rule 5).
 - A database written before Phase 3.6 (logs, no MANIFEST) opens like this with every log replayed.
 
 ## Primitive encodings

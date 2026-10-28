@@ -23,10 +23,12 @@
 //   newest log, and recovery still yields a prefix of the writes), starts a
 //   new log, and turns the memtable into the immutable memtable (imm_). Then,
 //   with mutex_ released, it writes imm_ to a new level-0 table, syncs it,
-//   records it in the MANIFEST (synced), installs the new Version, drops
-//   imm_, and deletes the old log. Writers wait meanwhile (until a background
-//   thread takes over, Phase 4.2); readers keep reading imm_ until the table
-//   is installed.
+//   records it in the MANIFEST (synced), installs the new Version and drops
+//   imm_. The old log is deleted one flush later, once another MANIFEST
+//   record follows the one that retired it (ADR 0007: a damaged last record
+//   is ignored, so the data it records must still be in a log). Writers wait
+//   meanwhile (until a background thread takes over, Phase 4.2); readers
+//   keep reading imm_ until the table is installed.
 //
 // Reads
 //   A read takes, under mutex_, the memtable, imm_, the current Version and
@@ -77,7 +79,7 @@
 
 namespace forgedb {
 
-// What recovery found when the database was opened. For tests and diagnostics.
+// What recovery found when the database was opened. For tests and tools.
 struct RecoveryInfo {
   struct TornTail {
     std::uint64_t log_number = 0;
@@ -125,12 +127,14 @@ class DBImpl final : public DB {
   [[nodiscard]] Result<std::string> Get(const ReadOptions& options, std::string_view key) override;
   [[nodiscard]] std::unique_ptr<Iterator> NewIterator(const ReadOptions& options) override;
 
+  // For tools (forgedb_cli stats) and tests.
+  [[nodiscard]] SequenceNumber LastSequence();
+  [[nodiscard]] std::shared_ptr<const Version> CurrentVersion();
+  [[nodiscard]] const RecoveryInfo& GetRecoveryInfo() const noexcept { return recovery_; }
+
   // For tests.
-  [[nodiscard]] SequenceNumber LastSequenceForTesting();
   [[nodiscard]] std::uint64_t GroupsWrittenForTesting();
   [[nodiscard]] std::uint64_t FlushesForTesting();
-  [[nodiscard]] std::shared_ptr<const Version> CurrentVersionForTesting();
-  [[nodiscard]] const RecoveryInfo& RecoveryInfoForTesting() const noexcept { return recovery_; }
 
  private:
   // A Write waiting in the queue.
@@ -204,6 +208,8 @@ class DBImpl final : public DB {
   std::unique_ptr<WritableFile> log_file_;
   std::unique_ptr<log::Writer> log_;
   std::uint64_t log_number_ = 0;
+  // The log the last flush retired, kept until the next MANIFEST record.
+  std::optional<std::uint64_t> retired_log_;
   std::uint64_t mem_entries_ = 0;  // entries in mem_ (a group adds its count)
   WriteBatch group_batch_;
 };

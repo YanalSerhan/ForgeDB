@@ -208,7 +208,7 @@ TEST(DBWriteTest, EveryWriteIsLoggedWithItsSequenceNumbers) {
   EXPECT_EQ(log[1].operations, "Put(b, 2) Delete(a) ");
   EXPECT_EQ(log[2].sequence, 4U);
   EXPECT_EQ(log[2].operations, "Delete(b) ");
-  EXPECT_EQ(test.Impl().LastSequenceForTesting(), 4U);
+  EXPECT_EQ(test.Impl().LastSequence(), 4U);
 }
 
 TEST(DBWriteTest, SyncOnlyWhenAsked) {
@@ -223,7 +223,7 @@ TEST(DBWriteTest, SyncOnlyWhenAsked) {
   ASSERT_TRUE(test.db->Put(Sync(false), "c", "3").ok());
   ASSERT_TRUE(test.db->Write(Sync(true), WriteBatch{}).ok());
   EXPECT_EQ(controls.syncs.load(), 2);
-  EXPECT_EQ(test.Impl().LastSequenceForTesting(), 3U);
+  EXPECT_EQ(test.Impl().LastSequence(), 3U);
 }
 
 // --- Group commit -------------------------------------------------------------------
@@ -266,7 +266,7 @@ TEST(DBWriteTest, ConcurrentWritersAreGroupedAndNothingIsLost) {
       ASSERT_EQ(Get(*test.db, key), "v" + key);
     }
   }
-  EXPECT_EQ(test.Impl().LastSequenceForTesting(), kWrites) << "one sequence number per write";
+  EXPECT_EQ(test.Impl().LastSequence(), kWrites) << "one sequence number per write";
   const std::uint64_t groups = test.Impl().GroupsWrittenForTesting();
   EXPECT_LT(groups, kWrites) << "writers that queued up behind a leader shared its log record";
 
@@ -324,7 +324,7 @@ TEST(DBWriteTest, FailedSyncRefusesAllLaterWritesButReadsWork) {
   EXPECT_EQ(Get(*test.db, "before"), "1") << "reads still work";
   EXPECT_EQ(Get(*test.db, "during"), "NOT_FOUND") << "the failed write was not applied";
   EXPECT_EQ(Get(*test.db, "after"), "NOT_FOUND");
-  EXPECT_EQ(test.Impl().LastSequenceForTesting(), 1U);
+  EXPECT_EQ(test.Impl().LastSequence(), 1U);
 }
 
 TEST(DBWriteTest, FailedAppendRefusesAllLaterWrites) {
@@ -363,7 +363,7 @@ TEST(DBWriteTest, FailureDuringConcurrentWritesFailsWholeGroupsAndNoOneHangs) {
   start.arrive_and_wait();
   // Inject the failure early (after 50 of 800 writes), so every thread is
   // still writing when it hits.
-  while (test.Impl().LastSequenceForTesting() < 50) {
+  while (test.Impl().LastSequence() < 50) {
     std::this_thread::yield();
   }
   test.fs->Knobs().fail_syncs = true;
@@ -384,7 +384,7 @@ TEST(DBWriteTest, FailureDuringConcurrentWritesFailsWholeGroupsAndNoOneHangs) {
     }
     EXPECT_TRUE(failed_once) << "thread " << t << " should have hit the injected failure";
   }
-  EXPECT_EQ(test.Impl().LastSequenceForTesting(), acknowledged_count);
+  EXPECT_EQ(test.Impl().LastSequence(), acknowledged_count);
 }
 
 }  // namespace

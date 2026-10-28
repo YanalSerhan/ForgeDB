@@ -12,8 +12,8 @@ target_include_directories(forgedb_test_support PUBLIC
   "${PROJECT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}")
 forgedb_target_defaults(forgedb_test_support)
 
-# One executable for all unit tests; model, crash, corruption and stress
-# suites get their own executables in later phases.
+# One executable for all unit tests; the model, crash and corruption suites
+# have their own executables below.
 add_executable(forgedb_unit_tests
   unit/arena_test.cpp
   unit/block_test.cpp
@@ -39,6 +39,7 @@ add_executable(forgedb_unit_tests
   unit/status_test.cpp
   unit/table_cache_test.cpp
   unit/table_test.cpp
+  unit/tools_test.cpp
   unit/version_edit_test.cpp
   unit/version_set_test.cpp
   unit/version_test.cpp
@@ -46,7 +47,7 @@ add_executable(forgedb_unit_tests
   unit/write_batch_test.cpp
 )
 target_link_libraries(forgedb_unit_tests PRIVATE
-  forgedb::forgedb forgedb_test_support GTest::gtest_main)
+  forgedb::forgedb forgedb_test_support forgedb_tools GTest::gtest_main)
 # Unit tests exercise internal classes, so they see src/ like the library does.
 target_include_directories(forgedb_unit_tests PRIVATE "${PROJECT_SOURCE_DIR}/src")
 forgedb_target_defaults(forgedb_unit_tests)
@@ -114,6 +115,25 @@ target_compile_definitions(forgedb_crash_tests PRIVATE
   FORGEDB_KILL_TEST_RUNS=${forgedb_kill_runs})
 forgedb_target_defaults(forgedb_crash_tests)
 gtest_discover_tests(forgedb_crash_tests DISCOVERY_MODE PRE_TEST)
+
+# Corruption suite (TODO 3.9): damage one file of a database (tables, logs,
+# MANIFESTs: bit flips, random or zeroed runs, truncation), reopen, and check
+# that every answer is right or a Corruption status. FORGEDB_CORRUPTION_TRIALS
+# and FORGEDB_CORRUPTION_SEED override at run time.
+add_executable(forgedb_corruption_tests
+  corruption/corruption_test.cpp
+)
+target_link_libraries(forgedb_corruption_tests PRIVATE
+  forgedb::forgedb forgedb_test_support GTest::gtest_main)
+if(CMAKE_BUILD_TYPE STREQUAL "Release" AND NOT FORGEDB_ASAN)
+  set(forgedb_corruption_trials 500)
+else()
+  set(forgedb_corruption_trials 100)
+endif()
+target_compile_definitions(forgedb_corruption_tests PRIVATE
+  FORGEDB_CORRUPTION_TEST_TRIALS=${forgedb_corruption_trials})
+forgedb_target_defaults(forgedb_corruption_tests)
+gtest_discover_tests(forgedb_corruption_tests DISCOVERY_MODE PRE_TEST)
 
 # ASan canary (sanitizer builds only): a program that overflows a heap buffer
 # on purpose. The test passes only if ASan's report appears, which proves the
