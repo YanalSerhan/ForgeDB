@@ -194,10 +194,9 @@ struct TortureOptions {
   std::size_t cycles = FORGEDB_CRASH_TEST_CYCLES;
   bool inject_errors = false;            // fail a random Append, Flush or Sync in most cycles
   bool log_fragments_in_values = false;  // see RandomValue
-  // With zero_pages_in_unsynced_tail, ADR 0004's strict rule can refuse to
-  // open (deferred to Phase 3.6). Then only the weaker promise is checked:
-  // an open either fails with Corruption or recovers a correct prefix.
-  bool corruption_allowed = false;
+  // How the DB is opened: a tiny memtable_bytes flushes on almost every write,
+  // so crashes land in flushes, MANIFEST writes and CURRENT switches.
+  Options db;
 };
 
 // What the runs actually exercised: a test that passes without crashing
@@ -212,15 +211,18 @@ struct Stats {
   std::size_t lost_unsynced_writes = 0;  // recoveries that kept fewer than all acknowledged writes
   std::size_t kept_failed_write = 0;     // recoveries that kept a write that had failed
   std::size_t torn_tails = 0;            // recoveries that ignored a torn tail in the newest log
-  std::size_t refused_opens = 0;         // Corruption, only where allowed
+  std::size_t dropped_valid_data = 0;    // point-in-time: valid records after a problem
+  std::size_t flushes = 0;               // memtable flushes while writing
 
   void Print(const char* name) const {
     std::printf(  // NOLINT(cppcoreguidelines-pro-type-vararg)
         "[ stats    ] %s: %zu cycles: %zu power losses, %zu process crashes, %zu clean closes, "
         "%zu deaths mid-operation, %zu failed writes; recoveries: %zu lost unsynced writes, "
-        "%zu kept a failed write, %zu ignored a torn tail, %zu refused to open (Corruption)\n",
+        "%zu kept a failed write, %zu ignored a torn tail, %zu dropped valid records after a "
+        "problem (point-in-time); %zu flushes\n",
         name, cycles, power_losses, process_crashes, clean_closes, died_mid_operation,
-        failed_writes, lost_unsynced_writes, kept_failed_write, torn_tails, refused_opens);
+        failed_writes, lost_unsynced_writes, kept_failed_write, torn_tails, dropped_valid_data,
+        flushes);
   }
 };
 
@@ -254,10 +256,6 @@ class Torture {
       if (const std::string problem = OneCycle(); !problem.empty()) {
         return Report(problem);
       }
-      if (refused_) {
-        refused_ = false;
-        NewDatabase(cycle);  // Corruption (allowed): continue on a fresh database
-      }
     }
     return "";
   }
@@ -275,13 +273,8 @@ class Torture {
 
   std::string OneCycle() {
     // 1. Recover, and check the result against what the last cycle allows.
-    Result<std::unique_ptr<DB>> opened = OpenDB(Options{}, "db", fs_);
+    Result<std::unique_ptr<DB>> opened = OpenDB(options_.db, "db", fs_);
     if (!opened.ok()) {
-      if (options_.corruption_allowed && opened.status().code() == Status::Code::kCorruption) {
-        ++stats_->refused_opens;
-        refused_ = true;
-        return "";
-      }
       return "open failed: " + opened.status().ToString();
     }
     db_ = std::move(opened).value();
@@ -330,8 +323,11 @@ class Torture {
     }
 
     // 4. Before the crash, readers see exactly the acknowledged writes: not
-    //    the failed one, even if part of it reached the log.
-    {
+    //    the failed one, even if part of it reached the log. Skipped if the
+    //    simulated process died mid-operation: reads open table files
+    //    (Phase 3), and a dead process can do nothing.
+    const bool dead = fs_->ProcessIsDead();
+    if (!dead) {
       State live = next.start;
       for (std::size_t i = 0; i < acknowledged; ++i) {
         ApplyTo(live, next.batches[i]);
@@ -343,8 +339,8 @@ class Torture {
     }
 
     // 5. End the cycle.
-    const bool dead = fs_->ProcessIsDead();
     stats_->died_mid_operation += dead ? 1U : 0U;
+    stats_->flushes += dynamic_cast<DBImpl&>(*db_).FlushesForTesting();
     next.acknowledged = acknowledged;
     next.last_failed = failed;
     next.highest = acknowledged + (failed ? 1U : 0U);
@@ -389,6 +385,11 @@ class Torture {
       return !info.logs_replayed.empty() && tail.log_number == info.logs_replayed.back();
     });
     stats_->torn_tails += torn_newest ? 1U : 0U;
+    stats_->dropped_valid_data +=
+        std::ranges::any_of(info.torn_tails,
+                            [](const auto& tail) { return tail.valid_data_dropped; })
+            ? 1U
+            : 0U;
     const SequenceNumber sequence = impl.LastSequenceForTesting();
     const State actual = ReadAll(*db_);
 
@@ -448,7 +449,6 @@ class Torture {
   State recovered_;
   SequenceNumber recovered_sequence_ = 0;
   std::size_t cycle_ = 0;
-  bool refused_ = false;
 };
 
 std::vector<std::uint64_t> Seeds() {
@@ -533,15 +533,47 @@ TEST(CrashTortureTest, InjectedWriteErrors) {
   }
 }
 
-// Pages of unsynced data written out of order (zero-filled holes). ADR 0004's
-// strict rule may then refuse to open the database (cure deferred to Phase
-// 3.6); until then this checks the weaker promise: Corruption, or a correct
-// prefix, never wrong data. The refusal rate is printed in the stats line.
+// Pages of unsynced data written out of order (zero-filled holes followed by
+// valid data). ADR 0004's strict rule refused to open about 3% of these
+// (Phase 2.5); since 3.6 the newest log stops at its first problem
+// (point-in-time, ADR 0004 rule 6), so every open must succeed with an
+// allowed prefix.
 TEST(CrashTortureTest, ZeroFilledPagesInUnsyncedTails) {
   TortureOptions options = WithTail(UnsyncedTail::kKeepPrefixTorn);
   options.fs.zero_pages_in_unsynced_tail = true;
-  options.corruption_allowed = true;
-  ExpectEverythingExercised(RunAll("zero-filled pages", options));
+  const Stats stats = RunAll("zero-filled pages", options);
+  ExpectEverythingExercised(stats);
+  if (stats.cycles >= 100) {
+    EXPECT_GT(stats.dropped_valid_data, 0U) << "point-in-time recovery was exercised";
+  }
+}
+
+// TODO 3.9: a small memtable flushes about every ten writes, so crashes
+// (power losses undo renames and removals by default) land during flushes,
+// MANIFEST writes and the CURRENT switch at every open.
+TortureOptions WithFlushes() {
+  TortureOptions options = WithTail(UnsyncedTail::kKeepPrefixTorn);
+  options.db.memtable_bytes = std::size_t{32} << 10;
+  return options;
+}
+
+TEST(CrashTortureTest, CrashesDuringFlushes) {
+  const Stats stats = RunAll("flushes", WithFlushes());
+  ExpectEverythingExercised(stats);
+  if (stats.cycles >= 100) {
+    EXPECT_GT(stats.flushes, stats.cycles) << "most cycles flushed at least once";
+  }
+}
+
+TEST(CrashTortureTest, CrashesDuringFlushesWithInjectedErrors) {
+  TortureOptions options = WithFlushes();
+  options.inject_errors = true;
+  const Stats stats = RunAll("flushes with injected errors", options);
+  ExpectEverythingExercised(stats);
+  if (stats.cycles >= 100) {
+    EXPECT_GT(stats.failed_writes, 0U);
+    EXPECT_GT(stats.flushes, 0U);
+  }
 }
 
 }  // namespace

@@ -12,9 +12,13 @@
 
 #include "db/db_iter.h"
 #include "db/filename.h"
+#include "db/version_edit.h"
+#include "db/version_set.h"
 #include "db/write_batch_internal.h"
 #include "env/win_file_system.h"
 #include "log/log_reader.h"
+#include "table/merging_iterator.h"
+#include "table/table_builder.h"
 
 namespace forgedb {
 namespace {
@@ -79,13 +83,59 @@ Status InLog(const Status& status, const std::filesystem::path& log) {
   return Status::Corruption(log.filename().generic_string() + ": " + status.message());
 }
 
-// Replays one log into `memtable`. Every record must be a valid batch whose
-// sequence number continues exactly where the previous one ended.
-Status ReplayLog(FileSystem& fs, const std::filesystem::path& db, std::uint64_t number,
-                 MemTable& memtable, SequenceNumber& last_sequence, RecoveryInfo& info) {
-  const std::filesystem::path path = LogFileName(db, number);
-  FORGEDB_ASSIGN_OR_RETURN(std::unique_ptr<SequentialFile> file, fs.NewSequentialFile(path));
-  log::Reader reader(std::move(file));
+}  // namespace
+
+Status ValidateOptions(const Options& options) {
+  if (options.memtable_bytes == 0) {
+    return Status::InvalidArgument("Options::memtable_bytes must be at least 1");
+  }
+  if (options.max_open_tables == 0) {
+    return Status::InvalidArgument("Options::max_open_tables must be at least 1");
+  }
+  if (options.filter_bits_per_key < 0 || options.filter_bits_per_key > 30) {
+    return Status::InvalidArgument("Options::filter_bits_per_key must be 0 to 30",
+                                   std::to_string(options.filter_bits_per_key));
+  }
+  if (options.block_size < 256 || options.block_size > (std::size_t{1} << 20)) {
+    return Status::InvalidArgument("Options::block_size must be 256 B to 1 MiB",
+                                   std::to_string(options.block_size));
+  }
+  return Status::OK();
+}
+
+Result<std::unique_ptr<DB>> OpenDB(const Options& options, const std::filesystem::path& name,
+                                   std::shared_ptr<FileSystem> file_system) {
+  if (name.empty()) {
+    return Status::InvalidArgument("database name is empty");
+  }
+  FORGEDB_RETURN_IF_ERROR(ValidateOptions(options));
+  auto db = std::make_unique<DBImpl>(options, name, std::move(file_system));
+  FORGEDB_RETURN_IF_ERROR(db->Recover());  // on error, the destructor releases what was taken
+  return std::unique_ptr<DB>(std::move(db));
+}
+
+DBImpl::DBImpl(const Options& options, std::filesystem::path name,
+               std::shared_ptr<FileSystem> file_system)
+    : options_(options),
+      name_(std::move(name)),
+      file_system_(std::move(file_system)),
+      block_cache_(options.block_cache_bytes > 0
+                       ? std::make_unique<BlockCache>(options.block_cache_bytes)
+                       : nullptr),
+      table_cache_(std::make_unique<TableCache>(file_system_.get(), name_, options.max_open_tables,
+                                                block_cache_.get())) {}
+
+Status DBImpl::ReplayLog(std::uint64_t number, bool newest, MemTable& memtable,
+                         SequenceNumber& last_sequence) {
+  const std::filesystem::path path = LogFileName(name_, number);
+  FORGEDB_ASSIGN_OR_RETURN(std::unique_ptr<SequentialFile> file,
+                           file_system_->NewSequentialFile(path));
+  // Only the newest log can hold writes that were never synced, and its
+  // recovered prefix goes into a table below, so it is never replayed again:
+  // it may end at its first problem (ADR 0004, rule 6). Older logs were
+  // synced before a newer one started: damage there is corruption.
+  log::Reader reader(std::move(file),
+                     newest ? log::Reader::Mode::kPointInTime : log::Reader::Mode::kStrict);
   WriteBatch batch;
   while (true) {
     const Result<std::optional<std::string_view>> record = reader.ReadRecord();
@@ -106,75 +156,153 @@ Status ReplayLog(FileSystem& fs, const std::filesystem::path& db, std::uint64_t 
     // Validates the batch and applies all of it or none.
     FORGEDB_RETURN_IF_ERROR(InLog(WriteBatchInternal::InsertInto(batch, memtable), path));
     last_sequence += batch.Count();
-    ++info.records_replayed;
+    ++recovery_.records_replayed;
   }
   if (const std::optional<log::Reader::TornTail>& tail = reader.IgnoredTail()) {
-    info.torn_tails.push_back(
-        {.log_number = number, .offset = tail->offset, .reason = tail->reason});
+    recovery_.torn_tails.push_back({.log_number = number,
+                                    .offset = tail->offset,
+                                    .reason = tail->reason,
+                                    .valid_data_dropped = tail->valid_data_dropped});
   }
-  info.logs_replayed.push_back(number);
+  recovery_.logs_replayed.push_back(number);
   return Status::OK();
 }
 
-}  // namespace
-
-Result<std::unique_ptr<DB>> OpenDB(const Options& /*options*/, const std::filesystem::path& name,
-                                   std::shared_ptr<FileSystem> file_system) {
-  if (name.empty()) {
-    return Status::InvalidArgument("database name is empty");
+Status DBImpl::WriteLevel0Table(MemTable& memtable, VersionEdit& edit) {
+  const std::unique_ptr<Iterator> entries = NewMemTableIterator(MemTableRef(&memtable));
+  entries->SeekToFirst();
+  if (!entries->Valid()) {
+    return Status::OK();  // nothing to write
   }
-  FileSystem& fs = *file_system;
-  FORGEDB_RETURN_IF_ERROR(fs.CreateDir(name));
+  const std::uint64_t number = versions_->NewFileNumber();
+  const std::filesystem::path path = TableFileName(name_, number);
+  FORGEDB_ASSIGN_OR_RETURN(std::unique_ptr<WritableFile> file, file_system_->NewWritableFile(path));
+  TableBuilder builder(
+      {.block_size = options_.block_size, .filter_bits_per_key = options_.filter_bits_per_key},
+      file.get());
+  FileMetaData meta{
+      .number = number, .file_size = 0, .smallest = std::string(entries->key()), .largest = {}};
+  for (; entries->Valid(); entries->Next()) {
+    meta.largest.assign(entries->key());
+    builder.Add(entries->key(), entries->value());
+  }
+  Status status = builder.Finish();
+  // Sync before the MANIFEST refers to it (ADR 0002, rule 3).
+  if (status.ok()) {
+    status = file->Sync();
+  }
+  if (status.ok()) {
+    status = file->Close();
+  }
+  if (!status.ok()) {
+    // Unreferenced, so the next open would delete it anyway.
+    file.reset();
+    static_cast<void>(file_system_->RemoveFile(path));
+    return status;
+  }
+  meta.file_size = builder.FileSize();
+  edit.added_files.push_back({.level = 0, .file = std::move(meta)});
+  return Status::OK();
+}
 
-  // One open DB per directory, across processes and within this one. The lock
-  // is released automatically if anything below fails.
-  Result<std::unique_ptr<FileLock>> lock = fs.LockFile(LockFileName(name));
+Status DBImpl::Recover() {
+  FileSystem& fs = *file_system_;
+  FORGEDB_RETURN_IF_ERROR(fs.CreateDir(name_));
+
+  // One open DB per directory, across processes and within this one.
+  Result<std::unique_ptr<FileLock>> lock = fs.LockFile(LockFileName(name_));
   if (!lock.ok()) {
     if (lock.status().code() == Status::Code::kBusy) {
       return Status::Busy("database is already open (in another process or another DB object)",
-                          name.generic_string());
+                          name_.generic_string());
     }
     return lock.status();
   }
+  lock_ = std::move(lock).value();
 
-  // Every log, oldest first. Names come from the directory: ParseFileName
-  // accepts only exact log names, and everything else is left alone.
-  FORGEDB_ASSIGN_OR_RETURN(const std::vector<std::string> children, fs.GetChildren(name));
+  FORGEDB_ASSIGN_OR_RETURN(const std::vector<std::string> children, fs.GetChildren(name_));
+  versions_ = std::make_unique<VersionSet>(file_system_.get(), name_);
+  FORGEDB_RETURN_IF_ERROR(versions_->Recover(children, recovery_.manifest));
+
+  // The logs written since the MANIFEST's last flush, oldest first. Older
+  // logs hold nothing that is not in a table; they are deleted below.
   std::vector<std::uint64_t> logs;
   for (const std::string& child : children) {
     if (const std::optional<ParsedFileName> parsed = ParseFileName(child);
-        parsed && parsed->type == FileType::kLog) {
+        parsed && parsed->type == FileType::kLog && parsed->number >= versions_->LogNumber()) {
       logs.push_back(parsed->number);
     }
   }
   std::ranges::sort(logs);
 
-  DBImpl::OpenedState state;
-  state.memtable = MemTable::Create();
-  for (const std::uint64_t number : logs) {
+  const MemTableRef recovered = MemTable::Create();
+  SequenceNumber last_sequence = versions_->LastSequence();
+  for (std::size_t i = 0; i < logs.size(); ++i) {
     FORGEDB_RETURN_IF_ERROR(
-        ReplayLog(fs, name, number, *state.memtable, state.last_sequence, state.recovery));
+        ReplayLog(logs[i], /*newest=*/i + 1 == logs.size(), *recovered, last_sequence));
   }
 
-  // Make what was just recovered durable before any new write can depend on
-  // it. The logs may hold data that was never synced (written without sync,
-  // or left in the OS's cache by a process crash). Without this, a later
-  // power loss could lose it while newer synced writes survive: a hole.
-  for (const std::uint64_t number : logs) {
-    FORGEDB_RETURN_IF_ERROR(fs.SyncFile(LogFileName(name, number)));
+  // Everything recovered goes into a synced table, so no log is replayed
+  // twice; then a new log and a new MANIFEST that records them.
+  VersionEdit edit;
+  FORGEDB_RETURN_IF_ERROR(WriteLevel0Table(*recovered, edit));
+  if (!edit.added_files.empty()) {
+    recovery_.table_written = edit.added_files.front().file.number;
   }
+  log_number_ = versions_->NewFileNumber();
+  FORGEDB_ASSIGN_OR_RETURN(log_file_, fs.NewWritableFile(LogFileName(name_, log_number_)));
+  log_ = std::make_unique<log::Writer>(log_file_.get());
+  edit.log_number = log_number_;
+  edit.last_sequence = last_sequence;
+  FORGEDB_RETURN_IF_ERROR(versions_->StartNewManifest(edit));
+  recovery_.new_log_number = log_number_;
+  recovery_.new_manifest_number = versions_->ManifestNumber();
 
-  // New writes go to a new log, so a torn tail in the old one stays where it
-  // is (and is ignored again on the next recovery).
-  if (!logs.empty() && logs.back() == UINT64_MAX) {
-    return Status::NotSupported("log numbers exhausted");
+  last_sequence_ = last_sequence;
+  version_ = versions_->Current();
+  mem_ = MemTable::Create();
+  DeleteObsoleteFiles();
+  return Status::OK();
+}
+
+void DBImpl::DeleteObsoleteFiles() {
+  Result<std::vector<std::string>> children = file_system_->GetChildren(name_);
+  if (!children.ok()) {
+    return;  // they will be deleted at the next open
   }
-  state.recovery.new_log_number = logs.empty() ? 1 : logs.back() + 1;
-  FORGEDB_ASSIGN_OR_RETURN(state.log_file,
-                           fs.NewWritableFile(LogFileName(name, state.recovery.new_log_number)));
-  state.lock = std::move(lock).value();
-  state.file_system = std::move(file_system);
-  return std::unique_ptr<DB>(std::make_unique<DBImpl>(std::move(state)));
+  std::vector<std::uint64_t> live;
+  for (const std::vector<FileMetaData>& level : version_->files) {
+    for (const FileMetaData& file : level) {
+      live.push_back(file.number);
+    }
+  }
+  for (const std::string& child : *children) {
+    const std::optional<ParsedFileName> parsed = ParseFileName(child);
+    if (!parsed) {
+      continue;  // not ours: left alone
+    }
+    bool obsolete = false;
+    switch (parsed->type) {
+      case FileType::kLog:
+        obsolete = parsed->number < log_number_;
+        break;
+      case FileType::kTable:
+        obsolete = std::ranges::find(live, parsed->number) == live.end();
+        break;
+      case FileType::kDescriptor:
+        obsolete = parsed->number != versions_->ManifestNumber();
+        break;
+      case FileType::kCurrentTemp:
+        obsolete = true;
+        break;
+      case FileType::kCurrent:
+      case FileType::kLock:
+        break;
+    }
+    if (obsolete && file_system_->RemoveFile(name_ / child).ok()) {
+      recovery_.files_deleted.push_back(child);
+    }
+  }
 }
 
 // --- Public interfaces (defined here so their vtables live in the library) ---
@@ -205,22 +333,20 @@ Status DB::Delete(const WriteOptions& options, std::string_view key) {
 
 // --- DBImpl ------------------------------------------------------------------
 
-DBImpl::DBImpl(OpenedState state)
-    : file_system_(std::move(state.file_system)),
-      lock_(std::move(state.lock)),
-      recovery_(std::move(state.recovery)),
-      mem_(std::move(state.memtable)),
-      last_sequence_(state.last_sequence),
-      log_file_(std::move(state.log_file)),
-      log_(log_file_.get()) {}
-
 DBImpl::~DBImpl() {
   // Destroying a DB while writes are in flight is a caller bug.
   FORGEDB_DCHECK(writers_.empty());
   // The destructor can't report errors; every acknowledged write has already
-  // been flushed (and synced, if asked). Close the log, then release LOCK.
-  static_cast<void>(log_file_->Close());
-  static_cast<void>(file_system_->UnlockFile(std::move(lock_)));
+  // been flushed (and synced, if asked). Close the files, then release LOCK,
+  // so the next owner finds nothing of ours open.
+  if (log_file_ != nullptr) {
+    static_cast<void>(log_file_->Close());
+  }
+  versions_.reset();
+  table_cache_.reset();
+  if (lock_ != nullptr) {
+    static_cast<void>(file_system_->UnlockFile(std::move(lock_)));
+  }
 }
 
 Status DBImpl::Write(const WriteOptions& options, const WriteBatch& batch) {
@@ -237,9 +363,13 @@ Status DBImpl::Write(const WriteOptions& options, const WriteBatch& batch) {
     return self.status;  // a leader wrote our batch as part of its group
   }
 
-  // We lead: write a group of batches starting with ours.
+  // We lead: make room if the memtable is full, then write a group of
+  // batches starting with ours.
   Status status = background_error_;
   const Writer* last = &self;
+  if (status.ok()) {
+    status = MakeRoomForWrite(lock);
+  }
   if (status.ok()) {
     const Group group = BuildGroup();
     last = group.last;
@@ -259,7 +389,7 @@ Status DBImpl::Write(const WriteOptions& options, const WriteBatch& batch) {
     bool log_touched = false;
     if (status.ok()) {
       log_touched = true;
-      status = log_.AddRecord(WriteBatchInternal::Contents(group_batch_));
+      status = log_->AddRecord(WriteBatchInternal::Contents(group_batch_));
     }
     if (status.ok() && group.sync) {
       status = log_file_->Sync();
@@ -273,6 +403,7 @@ Status DBImpl::Write(const WriteOptions& options, const WriteBatch& batch) {
     if (status.ok()) {
       last_sequence_ = first + count - 1;  // publishes the whole group at once
       ++groups_written_;
+      mem_entries_ += count;
     } else if (log_touched) {
       // The log on disk may now hold part of this record or all of it; the
       // memtable doesn't. Refuse every later write.
@@ -331,28 +462,152 @@ std::uint64_t DBImpl::GroupsWrittenForTesting() {
   return groups_written_;
 }
 
+std::uint64_t DBImpl::FlushesForTesting() {
+  const std::scoped_lock lock(mutex_);
+  return flushes_;
+}
+
+std::shared_ptr<const Version> DBImpl::CurrentVersionForTesting() {
+  const std::scoped_lock lock(mutex_);
+  return version_;
+}
+
+Status DBImpl::MakeRoomForWrite(std::unique_lock<std::mutex>& lock) {
+  if (mem_entries_ == 0 || mem_->ApproximateMemoryUsage() < options_.memtable_bytes) {
+    return Status::OK();
+  }
+
+  // 1. Switch logs. Sync the old one first: writes in the new log must not
+  //    survive a crash that loses older, unsynced ones (recovery yields a
+  //    prefix of the writes, never a hole).
+  const std::uint64_t old_log = log_number_;
+  const std::uint64_t new_log = versions_->NewFileNumber();
+  lock.unlock();
+  Status status = log_file_->Sync();
+  if (status.ok()) {
+    status = log_file_->Close();
+  }
+  Result<std::unique_ptr<WritableFile>> new_file = Status::Internal("not created");
+  if (status.ok()) {
+    new_file = file_system_->NewWritableFile(LogFileName(name_, new_log));
+    status = new_file.status();
+  }
+  lock.lock();
+  if (!status.ok()) {
+    background_error_ = status;
+    return status;
+  }
+  log_file_ = std::move(new_file).value();
+  log_ = std::make_unique<log::Writer>(log_file_.get());
+  log_number_ = new_log;
+  imm_ = std::move(mem_);
+  mem_ = MemTable::Create();
+  mem_entries_ = 0;
+  const SequenceNumber flushed_through = last_sequence_;
+  const MemTableRef immutable = imm_;
+
+  // 2. Write the immutable memtable to a table and record it, with the new
+  //    log as the first one recovery needs.
+  lock.unlock();
+  VersionEdit edit;
+  status = WriteLevel0Table(*immutable, edit);
+  if (status.ok()) {
+    edit.log_number = new_log;
+    edit.last_sequence = flushed_through;
+    status = versions_->LogAndApply(std::move(edit));
+  }
+  lock.lock();
+  if (!status.ok()) {
+    // imm_ stays readable; its data is still in the old log.
+    background_error_ = status;
+    return status;
+  }
+  version_ = versions_->Current();
+  imm_.Reset();
+  ++flushes_;
+
+  // 3. The old log is now redundant. If this fails, the next open deletes it.
+  lock.unlock();
+  static_cast<void>(file_system_->RemoveFile(LogFileName(name_, old_log)));
+  lock.lock();
+  return Status::OK();
+}
+
 DBImpl::ReadView DBImpl::CurrentReadView() {
   const std::scoped_lock lock(mutex_);
-  return {.memtable = mem_, .sequence = last_sequence_};
+  return {.memtable = mem_, .immutable = imm_, .version = version_, .sequence = last_sequence_};
 }
+
+namespace {
+
+// Whether `user_key` is within the file's key range.
+bool InRange(const FileMetaData& file, std::string_view user_key) noexcept {
+  return user_key >= ExtractUserKey(file.smallest) && user_key <= ExtractUserKey(file.largest);
+}
+
+Result<std::string> FoundOrNotFound(MemTable::GetResult result, std::string&& value) {
+  if (result == MemTable::GetResult::kFound) {
+    return std::move(value);
+  }
+  return Status::NotFound("key not found");
+}
+
+}  // namespace
 
 Result<std::string> DBImpl::Get(const ReadOptions& /*options*/, std::string_view key) {
   FORGEDB_RETURN_IF_ERROR(CheckKeySize(key));
   const ReadView view = CurrentReadView();
+  const LookupKey lookup(key, view.sequence);
   std::string value;
-  switch (view.memtable->Get(LookupKey(key, view.sequence), &value)) {
-    case MemTable::GetResult::kFound:
-      return value;
-    case MemTable::GetResult::kDeleted:
-    case MemTable::GetResult::kNotFound:
-      break;
+
+  // Newest data first: the memtable, the one being flushed, then the tables.
+  for (const MemTableRef* memtable : {&view.memtable, &view.immutable}) {
+    if (*memtable) {
+      const MemTable::GetResult result = (*memtable)->Get(lookup, &value);
+      if (result != MemTable::GetResult::kNotFound) {
+        return FoundOrNotFound(result, std::move(value));
+      }
+    }
+  }
+  // Level 0 newest first (its files may overlap); a deeper level has at most
+  // one file whose range holds the key (Phase 4).
+  for (const std::vector<FileMetaData>& level : view.version->files) {
+    for (const FileMetaData& file : level) {
+      if (!InRange(file, key)) {
+        continue;
+      }
+      FORGEDB_ASSIGN_OR_RETURN(const TableLookup found,
+                               table_cache_->Get(file.number, file.file_size, lookup, &value));
+      if (found == TableLookup::kFound) {
+        return value;
+      }
+      if (found == TableLookup::kDeleted) {
+        return Status::NotFound("key not found");
+      }
+    }
   }
   return Status::NotFound("key not found");
 }
 
 std::unique_ptr<Iterator> DBImpl::NewIterator(const ReadOptions& /*options*/) {
   ReadView view = CurrentReadView();
-  return NewDBIterator(std::move(view.memtable), view.sequence);
+  std::vector<std::unique_ptr<Iterator>> children;
+  children.push_back(NewMemTableIterator(std::move(view.memtable)));
+  if (view.immutable) {
+    children.push_back(NewMemTableIterator(std::move(view.immutable)));
+  }
+  for (const std::vector<FileMetaData>& level : view.version->files) {
+    for (const FileMetaData& file : level) {
+      Result<std::unique_ptr<Iterator>> table =
+          table_cache_->NewIterator(file.number, file.file_size);
+      if (!table.ok()) {
+        return NewErrorIterator(table.status());
+      }
+      children.push_back(std::move(table).value());
+    }
+  }
+  return NewDBIterator(NewMergingIterator(std::move(children), &CompareInternalKeys), view.sequence,
+                       std::move(view.version));
 }
 
 }  // namespace forgedb

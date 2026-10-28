@@ -76,7 +76,8 @@ std::string OffsetText(std::uint64_t offset) { return "offset " + std::to_string
 
 }  // namespace
 
-Reader::Reader(std::unique_ptr<SequentialFile> file) : file_(std::move(file)) {}
+Reader::Reader(std::unique_ptr<SequentialFile> file, Mode mode)
+    : file_(std::move(file)), mode_(mode) {}
 
 Status Reader::ReadBlock() {
   block_.resize(kBlockSize);
@@ -191,17 +192,19 @@ Result<std::optional<std::string_view>> Reader::ReadRecord() {
     switch (fragment.type) {
       case RecordType::kFull:
         if (in_record) {
-          return Finish(Status::Corruption("log record without its last fragment",
-                                           "record at " + OffsetText(record_start) +
-                                               ", next record at " + OffsetText(fragment.offset)));
+          return Damaged(Status::Corruption("log record without its last fragment",
+                                            "record at " + OffsetText(record_start) +
+                                                ", next record at " + OffsetText(fragment.offset)),
+                         record_start);
         }
         last_record_offset_ = fragment.offset;
         return std::optional<std::string_view>(fragment.payload);
       case RecordType::kFirst:
         if (in_record) {
-          return Finish(Status::Corruption("log record without its last fragment",
-                                           "record at " + OffsetText(record_start) +
-                                               ", next record at " + OffsetText(fragment.offset)));
+          return Damaged(Status::Corruption("log record without its last fragment",
+                                            "record at " + OffsetText(record_start) +
+                                                ", next record at " + OffsetText(fragment.offset)),
+                         record_start);
         }
         in_record = true;
         record_start = fragment.offset;
@@ -210,8 +213,9 @@ Result<std::optional<std::string_view>> Reader::ReadRecord() {
       case RecordType::kMiddle:
       case RecordType::kLast:
         if (!in_record) {
-          return Finish(Status::Corruption("log fragment without the start of its record",
-                                           OffsetText(fragment.offset)));
+          return Damaged(Status::Corruption("log fragment without the start of its record",
+                                            OffsetText(fragment.offset)),
+                         fragment.offset);
         }
         record_.append(fragment.payload);
         if (fragment.type == RecordType::kLast) {
@@ -242,9 +246,10 @@ Result<std::optional<std::string_view>> Reader::ClassifyProblem(std::uint64_t ta
   bool found = false;
   int byte_scanned_blocks = 0;
   if (problem_length_damaged_) {
-    return Finish(Status::Corruption(
-        "log corrupted: fragment length field damaged",
-        "at " + OffsetText(problem_offset_) + " (a shorter length matches its checksum)"));
+    return Damaged(Status::Corruption("log corrupted: fragment length field damaged",
+                                      "at " + OffsetText(problem_offset_) +
+                                          " (a shorter length matches its checksum)"),
+                   tail_offset);
   }
   std::size_t from = problem_search_from_;
   while (true) {
@@ -277,11 +282,22 @@ Result<std::optional<std::string_view>> Reader::ClassifyProblem(std::uint64_t ta
   }
 
   if (found) {
-    return Finish(Status::Corruption("log corrupted: " + problem_reason_,
-                                     "at " + OffsetText(problem_offset_) +
-                                         "; valid log data follows at " + OffsetText(found_at)));
+    return Damaged(Status::Corruption("log corrupted: " + problem_reason_,
+                                      "at " + OffsetText(problem_offset_) +
+                                          "; valid log data follows at " + OffsetText(found_at)),
+                   tail_offset);
   }
   ignored_tail_ = TornTail{.offset = tail_offset, .reason = problem_reason_};
+  return Finish(Status::OK());
+}
+
+Result<std::optional<std::string_view>> Reader::Damaged(Status corruption,
+                                                        std::uint64_t tail_offset) {
+  if (mode_ == Mode::kStrict) {
+    return Finish(std::move(corruption));
+  }
+  ignored_tail_ =
+      TornTail{.offset = tail_offset, .reason = corruption.message(), .valid_data_dropped = true};
   return Finish(Status::OK());
 }
 

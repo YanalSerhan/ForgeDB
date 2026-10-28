@@ -21,6 +21,7 @@ add_executable(forgedb_unit_tests
   unit/check_test.cpp
   unit/coding_test.cpp
   unit/crc32c_test.cpp
+  unit/db_flush_test.cpp
   unit/db_recovery_test.cpp
   unit/db_test.cpp
   unit/db_write_test.cpp
@@ -32,11 +33,14 @@ add_executable(forgedb_unit_tests
   unit/log_test.cpp
   unit/lru_cache_test.cpp
   unit/memtable_test.cpp
+  unit/merging_iterator_test.cpp
   unit/result_test.cpp
   unit/skip_list_test.cpp
   unit/status_test.cpp
   unit/table_cache_test.cpp
   unit/table_test.cpp
+  unit/version_edit_test.cpp
+  unit/version_set_test.cpp
   unit/version_test.cpp
   unit/win_file_system_test.cpp
   unit/write_batch_test.cpp

@@ -1,6 +1,6 @@
 # ADR 0004: Log recovery tells a torn tail from mid-log corruption, and stops on corruption
 
-- **Status:** Accepted; amended in Phase 2.7 (rule 5)
+- **Status:** Accepted; amended in Phase 2.7 (rule 5) and Phase 3.6 (rule 6)
 - **Date:** 2026-10-24
 
 ## Context
@@ -34,13 +34,25 @@ The reader cannot know where the last `Sync` ended, so it needs a rule that uses
    matches the CRC, the real fragment ended there and data follows it, so it is corruption
    ("fragment length field damaged"). A torn fragment's CRC covers its whole, never-finished
    payload, so no prefix matches it, except by a coincidence of about 1 in 2^32 per length tried.
+6. *(Amended in Phase 3.6.)* Rules 1-3 apply to every log **but the newest** one replayed at an
+   open. The newest log is read **point-in-time**: it ends at its first problem whatever follows
+   it, and the records after the problem are dropped and reported (`Reader::Mode::kPointInTime`;
+   `RecoveryInfo::TornTail::valid_data_dropped` says whether valid records followed). This is
+   safe because of two Phase 3 invariants:
+   - When the DB switches to a new log (a memtable flush), it syncs the old one first. So only
+     the newest log can hold writes that were never synced, and damage followed by valid data in
+     an older log cannot come from a crash: rules 1-3 still apply there.
+   - Every open writes what it recovered to a synced table and records it in a new MANIFEST whose
+     log number is above every replayed log (ADR 0007). So the newest log, cut at its problem, is
+     never replayed again: the records after the cut can never be read later, under the strict
+     rule or alongside new writes that reuse their sequence numbers.
 
 ## Alternatives considered
 
-- **Point-in-time recovery** (RocksDB's default WAL recovery mode): replay up to the first problem,
-  keep that consistent prefix, warn. Opening never fails, but real mid-log damage silently loses
-  the synced writes after it. Not chosen as the default; it can be added as an option later on
-  top of the same classification.
+- **Point-in-time recovery for every log** (RocksDB's default WAL recovery mode): replay up to
+  the first problem, keep that consistent prefix, warn. Opening never fails, but real mid-log
+  damage silently loses the synced writes after it. Adopted in Phase 3.6 for the newest log only
+  (rule 6), where crashes do produce damage followed by valid data; older logs stay strict.
 - **Skip damaged records and continue** (LevelDB's lenient mode): keeps more data, but the result
   can have holes: a later write applied without an earlier one. Breaks prefix consistency.
 - **Treat every problem as the end of the log**: simplest, same silent loss as point-in-time.
@@ -59,7 +71,13 @@ The reader cannot know where the last `Sync` ended, so it needs a rule that uses
   *Decided in 2.5:* keep this rule for now and cure it in Phase 3.6, where open writes the
   recovered data to a synced table and the MANIFEST, so a log is replayed only while it is the
   newest; the newest log can then stop at its first problem (point-in-time, reported) without
-  ever being read again under the strict rule. This ADR will be amended then.
+  ever being read again under the strict rule. *Amended in 3.6 (rule 6).* Measured after the
+  change (Linux, 600 cycles of the zero-filled-pages variant): no refused opens; 20 recoveries cut
+  the newest log at a problem with valid records after it, each an allowed prefix of the writes.
+- What rule 6 gives up: real damage in the newest log (a bad sector, not a crash) now drops the
+  writes after it, synced ones included, instead of failing the open. The loss is reported
+  (`RecoveryInfo`), not silent, and limited to the newest log: since every open and every flush
+  moves recovered data into a table, that log holds only the writes since the last flush or open.
 - *Found by fuzzing in Phase 2.7, fixed by rule 5:* before rule 5, a torn record whose own
   payload contained bytes forming a valid fragment (7 bytes suffice: an empty FULL fragment; or a
   log file stored as a value) was reported as corruption, so a crash at the wrong moment left a
@@ -76,5 +94,5 @@ The reader cannot know where the last `Sync` ended, so it needs a rule that uses
 
 ## References
 
-- `src/log/log_reader.h`, `src/log/log_reader.cpp`
-- ADR 0002 (durability rules on Windows)
+- `src/log/log_reader.h`, `src/log/log_reader.cpp`; `src/db/db_impl.cpp` (`ReplayLog`)
+- ADR 0002 (durability rules on Windows); ADR 0007 (MANIFEST and CURRENT)

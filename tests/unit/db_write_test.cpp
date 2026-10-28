@@ -130,6 +130,9 @@ TestDB OpenTestDB() {
   Result<std::unique_ptr<DB>> db = OpenDB(Options{}, "db", test.fs);
   EXPECT_TRUE(db.ok()) << db.status().ToString();
   test.db = std::move(db).value();
+  // Opening syncs the new MANIFEST and CURRENT.tmp (Phase 3.6); the tests
+  // count the syncs of writes.
+  test.fs->Knobs().syncs = 0;
   return test;
 }
 

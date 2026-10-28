@@ -20,7 +20,8 @@ Code: `src/db/filename.*`, `OpenDB` in `src/db/db_impl.cpp`. Tests: `tests/unit/
 | `000005.log` | write-ahead log number 5 (see "Write-ahead log") | 2.2 |
 | `000007.sst` | table file number 7 | Phase 3 |
 | `MANIFEST-000003` | descriptor number 3 | Phase 3.6 |
-| `CURRENT` | names the current MANIFEST | Phase 3.6 |
+| `CURRENT` | names the current MANIFEST (a hint, see "MANIFEST and CURRENT") | Phase 3.6 |
+| `CURRENT.tmp` | the next `CURRENT`, before it is renamed over it | Phase 3.6 |
 | `LOCK` | empty; locked (`LockFileEx`, exclusive) while the database is open | 2.3 |
 
 - File numbers are decimal with at least six digits (`000005`); from 1,000,000 on the name has
@@ -28,15 +29,24 @@ Code: `src/db/filename.*`, `OpenDB` in `src/db/db_impl.cpp`. Tests: `tests/unit/
 - Names in the directory are untrusted. Only these exact spellings are database files; anything
   else (`5.log`, `0000005.log`, `000005.LOG`, a number above 2^64 - 1, other files) is ignored and
   never modified or deleted.
-- **Open (Phase 2).** Lock `LOCK` (if it is held: `Busy`), then replay every `.log` file in
-  increasing number order. Sequence numbers must be contiguous: the first record starts at 1 and
-  every later record, in the same log or the next, starts at the previous record's sequence plus
-  its count (an empty batch uses no numbers); otherwise the open fails with `Corruption`.
-  A torn tail is ignored (each log is read on its own: a torn tail ends that log, not the replay);
-  mid-log damage fails the open. Every replayed log is then synced (`FileSystem::SyncFile`), so
-  data recovered from it cannot be lost by a later crash once newer writes depend on it. New
-  writes go to a new log numbered one above the highest existing log, so a torn tail is never
-  appended to. Logs are not deleted before Phase 3.
+- **Open (Phase 3.6; ADR 0007).** Lock `LOCK` (if it is held: `Busy`). Pick the MANIFEST to
+  trust and load it (see "MANIFEST and CURRENT"); every table it lists must exist with its
+  recorded size. Replay the `.log` files numbered at or above its log number, in increasing order.
+  Sequence numbers must be contiguous: the first record starts at the MANIFEST's last sequence
+  number plus 1 (plus 1 from 0 without a MANIFEST) and every later record, in the same log or the
+  next, starts at the previous record's sequence plus its count (an empty batch uses no numbers);
+  otherwise the open fails with `Corruption`. Every log but the newest is read strictly (ADR 0004:
+  a torn tail ends it, mid-log damage fails the open); the newest stops at its first problem and
+  reports what it dropped (ADR 0004, rule 6). Then: write what was recovered to a new table
+  (synced), create a new log, write a new MANIFEST whose snapshot lists the table and names the
+  new log, switch `CURRENT` to it, and delete every file the new MANIFEST does not need (older
+  logs and MANIFESTs, unlisted tables, `CURRENT.tmp`). New file numbers are above every number in
+  the directory.
+- **Flush (Phase 3.5).** When the memtable reaches `Options::memtable_bytes`, the current log is
+  synced and a new one started; the old memtable is written to a new table (synced), a version
+  edit adding it and naming the new log is appended to the MANIFEST (synced), and only then is the
+  old log deleted.
+- A database written before Phase 3.6 (logs, no MANIFEST) opens like this with every log replayed.
 
 ## Primitive encodings
 
@@ -363,6 +373,48 @@ whatever its number of versions). A lookup that the filter rejects skips the tab
 - A filter shorter than 2 bytes, or with `k` outside `[1, 30]`, matches every key: a damaged
   filter can cost reads, never hide a key.
 
+## Version edit
+
+Code: `src/db/version_edit.*`. Tests: `tests/unit/version_edit_test.cpp`.
+
+A version edit records a change to the set of live files. It is a sequence of fields, each a
+varint32 tag followed by its value; any field may be absent, and the order is free (the writer
+puts the scalars first):
+
+| Tag | Field | Value |
+|---|---|---|
+| 1 | log number | varint64: logs numbered below it hold nothing that is not in a table |
+| 2 | next file number | varint64 |
+| 3 | last sequence | varint64: the last write that is in a table or an older log; at most 2^56 - 1 |
+| 4 | removed file | varint32 level, varint64 file number |
+| 5 | added file | varint32 level, varint64 file number, varint64 file size, length-prefixed smallest internal key, length-prefixed largest internal key |
+
+- Levels are 0 to 6. Only level 0 is used before Phase 4; level-0 files may overlap.
+- Decoding is strict: an unknown tag, a truncated value, a scalar given twice, a level out of
+  range, a key that is not a valid internal key, or a smallest key after the largest is
+  `Corruption`.
+- Example: log number 4, next file number 6, last sequence 300, and table 3 (900 bytes, keys `a`
+  at sequence 1 to `b` at sequence 2) at level 0:
+  `01 04 | 02 06 | 03 AC 02 | 05 00 03 84 07 09 61 01 01 00 00 00 00 00 00 09 62 01 02 00 00 00 00 00 00`.
+
 ## MANIFEST and CURRENT
 
-Phase 3.6.
+Code: `src/db/version_set.*`. Tests: `tests/unit/version_set_test.cpp`,
+`tests/unit/db_flush_test.cpp`, `tests/crash/crash_torture_test.cpp`. Design: ADR 0007.
+
+- **`MANIFEST-N`** is a file in the write-ahead log format (see "Write-ahead log") whose records
+  are version edits. The first record is a *snapshot*: it has all three scalars (tags 1-3) and adds
+  every live file. Each later record is an edit applied on top. A new MANIFEST is written at every
+  open; flushes append edits to it, each synced before it takes effect.
+- **`CURRENT`** holds the name of the MANIFEST written last, followed by a newline:
+  `MANIFEST-000005` `0A`. It is replaced by writing `CURRENT.tmp`, syncing it and renaming it over
+  `CURRENT`.
+- **Which MANIFEST recovery uses** (option B of ADR 0002, ADR 0007): the newest `MANIFEST-N` whose
+  first record is complete (a valid snapshot). A newer one whose first record is missing or cut
+  short is skipped. In the chosen MANIFEST, an unfinished last record is ignored (torn tail);
+  anything else wrong is `Corruption`. `CURRENT` is not needed; it is checked only for
+  consistency: naming an existing but incomplete MANIFEST, or existing while no MANIFEST is
+  complete, is `Corruption`. A directory with no MANIFEST and no `CURRENT` is a new database (or a
+  Phase 2 one).
+- Applying an edit that removes a file that is not live, or adds one that already is, is
+  `Corruption`.

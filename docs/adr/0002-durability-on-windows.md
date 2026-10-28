@@ -1,8 +1,9 @@
 # ADR 0002: Durability rules on Windows
 
-- **Status:** Proposed. Rules 1-10 and 12 are implemented in `src/env/` (Phase 0.4); rule 11, an
-  assumption, was added in Phase 2.4; rule 13 in Phase 2.5. The open question at the end needs a decision before
-  Phase 3. This ADR is the Phase 0 exit-gate item "reviewed line by line".
+- **Status:** Accepted. Rules 1-10 and 12 are implemented in `src/env/` (Phase 0.4); rule 11, an
+  assumption, was added in Phase 2.4; rule 13 in Phase 2.5. The open question at the end was
+  decided in Phase 3.6: option B, recorded in ADR 0007. This ADR is the Phase 0 exit-gate item
+  "reviewed line by line".
 - **Date:** 2026-10-23
 
 ## Context
@@ -174,7 +175,9 @@ Option B costs a little complexity in Phase 3.6 (directory scan, verification) a
 correctness argument that uses only documented behavior. The fault-injection file system
 (Phase 2.4) can then model "the rename didn't persist" as an ordinary crash outcome and test it.
 
-**Decision needed** from the project owner before Phase 3.
+**Decided** by the project owner in Phase 3.6: **option B**, implemented as described in ADR 0007
+(`src/db/version_set.cpp`). Since 3.6, rule 13 is no longer needed at open (recovered data goes
+into a synced table instead), but `SyncFile` stays in the interface.
 
 ## Alternatives considered
 
@@ -201,7 +204,7 @@ correctness argument that uses only documented behavior. The fault-injection fil
 - **The fault-injection model trusts only these rules.** After a simulated power loss, synced
   bytes survive (F2, F3); a name survives once its file was synced under it (rule 3); a rename or
   a removal may be undone, unless the `durable_renames` / `durable_removals` options say otherwise
-  (F5, F7); directories survive (rule 11). The open question below can therefore be tested both
+  (F5, F7); directories survive (rule 11). The open question below could therefore be tested both
   ways: option A with `durable_renames = true`, option B with the default.
 - **Limitations** (also in `TODO.md`, "Known limitations"):
   - Durability depends on the drive honoring flush requests; the write-cache setting in F4 voids it.
@@ -210,7 +213,8 @@ correctness argument that uses only documented behavior. The fault-injection fil
     `FileDispositionInfoEx` with `ERROR_INVALID_PARAMETER`, so under Wine the conformance test
     "RemoveWhileOpenKeepsHandleAndFreesName" fails by design.
   - Paths are limited to `MAX_PATH` unless long paths are enabled (F12).
-- Revisit when the open question is decided, or if Microsoft documents rename durability.
+- Revisit if Microsoft documents rename durability (option A would then be enough, though option B
+  stays correct).
 
 ## References
 

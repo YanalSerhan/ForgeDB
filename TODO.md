@@ -243,37 +243,38 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - [x] Concurrency test: many threads hitting the cache; ASan clean (16 threads on the LRU cache, 8 on a table, 8 on the table cache with constant eviction; ASan and TSan clean on Linux)
 
 ### 3.5 Flush to L0
-- [ ] Memtable switch when `ApproximateMemoryUsage()` passes `memtable_bytes`; a new log file per memtable (moved from 2.3)
-- [ ] Immutable memtable → `TableBuilder` → new `.sst` file → `Sync` → close
-- [ ] Old log deleted only after the new table is recorded in the MANIFEST and synced
+- [x] Memtable switch when `ApproximateMemoryUsage()` passes `memtable_bytes`; a new log file per memtable (moved from 2.3) (the old log is synced first, so only the newest log can lose unsynced writes; the flush runs in the writing thread until 4.2; new `Options`: `memtable_bytes`, `block_cache_bytes`, `max_open_tables`, `filter_bits_per_key`, `block_size`, checked at open)
+- [x] Immutable memtable → `TableBuilder` → new `.sst` file → `Sync` → close (readers keep reading the immutable memtable until the table is installed)
+- [x] Old log deleted only after the new table is recorded in the MANIFEST and synced (a failed flush is the sticky write error; nothing is lost: `FlushFailureTest`)
 
 ### 3.6 MANIFEST and versions
-- [ ] `VersionEdit`: log number, next file number, last sequence, added files (level, number, size, smallest and largest key), deleted files; encode/decode with tags
-- [ ] MANIFEST = a log file (same format as 2.1) of `VersionEdit` records
-- [ ] `CURRENT` update: write `MANIFEST-xxxxxx` name to a temp file → `Sync` → `RenameReplace` to `CURRENT`
-- [ ] `Version` (files per level) and `VersionSet` (current version, applies edits)
-- [ ] Recovery: read `CURRENT` → replay MANIFEST → replay logs newer than its log number (until then, 2.3 replays every log)
-- [ ] On open, delete files not referenced by the current version (leftovers from a crash)
-- [ ] Zero-filled pages in the newest log (from 2.5): at open, write the recovered memtable to a synced table and record it in the MANIFEST, so old logs are never replayed again; then the newest log stops at its first problem (point-in-time, reported) instead of failing the open. Amend ADR 0004, and switch `CrashTortureTest.ZeroFilledPagesInUnsyncedTails` to "always opens"
+- [x] `VersionEdit`: log number, next file number, last sequence, added files (level, number, size, smallest and largest key), deleted files; encode/decode with tags (strict decoder: unknown tags, repeats, bad keys and levels are `Corruption`)
+- [x] MANIFEST = a log file (same format as 2.1) of `VersionEdit` records (first record a full snapshot; every edit synced before it takes effect; a new MANIFEST at every open)
+- [x] `CURRENT` update: write `MANIFEST-xxxxxx` name to a temp file → `Sync` → `RenameReplace` to `CURRENT` (`CURRENT.tmp`)
+- [x] `Version` (files per level) and `VersionSet` (current version, applies edits) (versions shared by `std::shared_ptr`: iterators keep theirs)
+- [x] Recovery: read `CURRENT` → replay MANIFEST → replay logs newer than its log number (until then, 2.3 replays every log). *Changed (approved, ADR 0002 option B, ADR 0007):* `CURRENT` is only a hint; recovery uses the newest MANIFEST whose snapshot record is complete, so it never depends on the rename surviving a power loss. Listed tables must exist with their recorded size. Phase 2 databases (no MANIFEST) open by replaying every log
+- [x] On open, delete files not referenced by the current version (leftovers from a crash) (older logs and MANIFESTs, unlisted tables, `CURRENT.tmp`; only exact ForgeDB names)
+- [x] Zero-filled pages in the newest log (from 2.5): at open, write the recovered memtable to a synced table and record it in the MANIFEST, so old logs are never replayed again; then the newest log stops at its first problem (point-in-time, reported) instead of failing the open. Amend ADR 0004, and switch `CrashTortureTest.ZeroFilledPagesInUnsyncedTails` to "always opens" (ADR 0004 rule 6; Linux, 600 cycles: 0 refused opens, 20 recoveries cut the newest log before valid records)
 
 ### 3.7 Merged reads
-- [ ] Merging iterator (min-heap over child iterators: memtable, immutable, L0 files, levels)
-- [ ] DB iterator at a sequence number: hides older versions and deletions
-- [ ] `Get` path: memtable → immutable → L0 newest first → one file per deeper level
+*Brought forward into 3.5-3.6 (approved): once a flush drops a memtable, reads must see tables.*
+- [x] Merging iterator (min-heap over child iterators: memtable, immutable, L0 files, levels) (`src/table/merging_iterator.*`; stops at the first child error)
+- [x] DB iterator at a sequence number: hides older versions and deletions (now over any internal iterator; malformed keys are `Corruption`; holds the `Version`)
+- [x] `Get` path: memtable → immutable → L0 newest first → one file per deeper level (deeper levels stay empty until Phase 4 compaction)
 
 ### 3.8 Tools
 - [ ] `sst_dump`: print a table's footer, index, filter stats and entries
 - [ ] `forgedb_cli`: `put`, `get`, `delete`, `scan`, `stats` from the command line
 
 ### 3.9 Tests
-- [ ] Model test now runs with a small `memtable_bytes` so data constantly flushes to tables
-- [ ] Crash torture extended: crashes during flush and during the `CURRENT` switch
+- [x] Model test now runs with a small `memtable_bytes` so data constantly flushes to tables (`AgreesWithStdMapAcrossFlushes`: the memtable is sized for about 100 flushes per run, since every level-0 table slows reads until compaction; ~80 tables per seed at 20,000 operations)
+- [x] Crash torture extended: crashes during flush and during the `CURRENT` switch (`CrashTortureTest.CrashesDuringFlushes` and `...WithInjectedErrors`; `FlushCrashTest` crashes at every operation of a flush and of an open; the process-kill child uses a 64 KiB memtable)
 - [ ] Corruption tests: flip random bits in `.sst`, `.log` and MANIFEST files; every read returns correct data or a corruption status, never wrong data, never a crash
 - [ ] Fuzz targets: block parser, table footer, `VersionEdit` decoder
 
 ### 3.10 Docs
 - [x] ADR: table format (block size, restart interval, one filter per table): ADR 0006 (and ADR 0005 for the filter)
-- [ ] ADR: MANIFEST + `CURRENT` switch on Windows
+- [x] ADR: MANIFEST + `CURRENT` switch on Windows: ADR 0007 (and ADR 0002's open question closed, option B)
 - [ ] README: architecture diagram, build steps, short feature list, current status
 
 ### ✅ Exit gate — Phase 3 (minimum CV-worthy engine)
@@ -393,4 +394,6 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - [ ] Durability needs a drive that honors flush requests; "Turn off Windows write-cache buffer flushing" voids it (ADR 0002, F4)
 - [ ] File systems without POSIX delete (FAT32, some network shares, Wine) keep a removed file's name until its last handle closes (ADR 0002, rule 7)
 - [ ] Database paths are limited to MAX_PATH unless Windows long paths are enabled
+- [ ] Real damage (not a crash) in the newest log drops the writes after it instead of failing the open (point-in-time, reported in `RecoveryInfo`; ADR 0004 rule 6)
+- [ ] Until compaction (Phase 4), every flush and every open with unflushed writes adds a level-0 table, and reads consider every level-0 table
 - [ ] Until Phase 3.6: if a power loss leaves unsynced log pages written out of order (undocumented whether NTFS can), the open may fail with `Corruption` instead of dropping the unsynced writes (ADR 0004; measured in 2.5)

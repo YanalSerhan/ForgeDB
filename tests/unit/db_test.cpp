@@ -277,7 +277,7 @@ TEST(DBIterTest, ReseekNextToSequenceZeroStillMakesProgress) {
     table->Add(sequence, ValueType::kValue, "a", "a" + std::to_string(sequence));
   }
   table->Add(1, ValueType::kValue, "b", "b");
-  const std::unique_ptr<Iterator> it = NewDBIterator(std::move(table), 100);
+  const std::unique_ptr<Iterator> it = NewDBIterator(NewMemTableIterator(std::move(table)), 100);
   EXPECT_EQ(Scan(*it), "a=a9 b=b ");
 }
 
@@ -287,10 +287,10 @@ TEST(DBIterTest, ReadsAtTheGivenSequence) {
   table->Add(2, ValueType::kDeletion, "a", "");
   table->Add(3, ValueType::kValue, "b", "b3");
   // Each iterator takes its own reference (a copy of `table`).
-  EXPECT_EQ(Scan(*NewDBIterator(table, 0)), "");
-  EXPECT_EQ(Scan(*NewDBIterator(table, 1)), "a=a1 ");
-  EXPECT_EQ(Scan(*NewDBIterator(table, 2)), "");
-  EXPECT_EQ(Scan(*NewDBIterator(table, 3)), "b=b3 ");
+  EXPECT_EQ(Scan(*NewDBIterator(NewMemTableIterator(table), 0)), "");
+  EXPECT_EQ(Scan(*NewDBIterator(NewMemTableIterator(table), 1)), "a=a1 ");
+  EXPECT_EQ(Scan(*NewDBIterator(NewMemTableIterator(table), 2)), "");
+  EXPECT_EQ(Scan(*NewDBIterator(NewMemTableIterator(table), 3)), "b=b3 ");
 }
 
 // --- Concurrency --------------------------------------------------------------------------

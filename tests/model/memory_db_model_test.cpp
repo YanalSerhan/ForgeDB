@@ -8,7 +8,10 @@
 // debug and sanitizer builds, which run 20-50x slower. Override at run time:
 //   FORGEDB_MODEL_OPS=5000000   operations per seed
 //   FORGEDB_MODEL_SEED=17       run only this seed (e.g. to reproduce a failure)
+#include <algorithm>
+#include <cstddef>
 #include <cstdint>
+#include <cstdio>
 
 #include <gtest/gtest.h>
 
@@ -59,6 +62,41 @@ TEST_P(MemoryDBModelTest, AgreesWithStdMap) {
   options.operations = OperationsPerSeed();
   options.generator.expected_reopens = 5;
   EXPECT_EQ(RunModelTest(setup, options), "");
+}
+
+// TODO 3.9: the same with a small memtable, so data constantly moves from
+// memtables to tables and reads merge many tables (and a reopen writes one
+// more). The memtable is sized for about 100 flushes per run whatever the
+// operation count (the generator writes about 66 bytes of memtable per
+// operation, measured): without compaction (Phase 4) every flush adds a
+// level-0 table that every read must consider.
+TEST_P(MemoryDBModelTest, AgreesWithStdMapAcrossFlushes) {
+  Options db_options;
+  db_options.memtable_bytes = std::max(std::size_t{16} << 10, OperationsPerSeed() * 64 / 100);
+  db_options.block_cache_bytes = std::size_t{64} << 10;  // small: misses and evictions too
+  const auto storage = std::make_shared<std::shared_ptr<MemFileSystem>>();
+  const DbSetup setup(
+      [storage, db_options] {
+        *storage = std::make_shared<MemFileSystem>();
+        return OpenDB(db_options, "model-test", *storage);
+      },
+      [storage, db_options] { return OpenDB(db_options, "model-test", *storage); });
+  RunOptions options;
+  options.seed = GetParam();
+  options.operations = OperationsPerSeed();
+  options.generator.expected_reopens = 5;
+  EXPECT_EQ(RunModelTest(setup, options), "");
+
+  // The run must really have flushed: count the tables it left.
+  const Result<std::vector<std::string>> children = (*storage)->GetChildren("model-test");
+  ASSERT_TRUE(children.ok());
+  const auto tables = std::ranges::count_if(
+      *children, [](const std::string& name) { return name.ends_with(".sst"); });
+  std::printf("[ model    ] seed %llu: %lld tables at the end\n",  // NOLINT(*-vararg)
+              static_cast<unsigned long long>(GetParam()), static_cast<long long>(tables));
+  if (options.operations >= 10000) {
+    EXPECT_GT(tables, 30);
+  }
 }
 
 INSTANTIATE_TEST_SUITE_P(Seeds, MemoryDBModelTest, testing::ValuesIn(Seeds()));

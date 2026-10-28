@@ -55,11 +55,18 @@ std::filesystem::path DescriptorFileName(const std::filesystem::path& db, std::u
 
 std::filesystem::path CurrentFileName(const std::filesystem::path& db) { return db / "CURRENT"; }
 
+std::filesystem::path CurrentTempFileName(const std::filesystem::path& db) {
+  return db / "CURRENT.tmp";
+}
+
 std::filesystem::path LockFileName(const std::filesystem::path& db) { return db / "LOCK"; }
 
 std::optional<ParsedFileName> ParseFileName(std::string_view name) noexcept {
   if (name == "CURRENT") {
     return ParsedFileName{.type = FileType::kCurrent, .number = 0};
+  }
+  if (name == "CURRENT.tmp") {
+    return ParsedFileName{.type = FileType::kCurrentTemp, .number = 0};
   }
   if (name == "LOCK") {
     return ParsedFileName{.type = FileType::kLock, .number = 0};

@@ -1,6 +1,8 @@
 #include "db/db_iter.h"
 
 #include <cstdint>
+#include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -12,13 +14,14 @@ namespace {
 
 class DBIter final : public Iterator {
  public:
-  DBIter(MemTableRef memtable, SequenceNumber sequence) noexcept
-      : memtable_(std::move(memtable)), entries_(&*memtable_), sequence_(sequence) {}
+  DBIter(std::unique_ptr<Iterator> entries, SequenceNumber sequence,
+         std::shared_ptr<const void> pin) noexcept
+      : pin_(std::move(pin)), entries_(std::move(entries)), sequence_(sequence) {}
 
   [[nodiscard]] bool Valid() const override { return valid_; }
 
   void SeekToFirst() override {
-    entries_.SeekToFirst();
+    entries_->SeekToFirst();
     FindNextUserEntry(/*skipping=*/false);
   }
 
@@ -29,15 +32,15 @@ class DBIter final : public Iterator {
     seek_key_.clear();
     AppendInternalKey(seek_key_,
                       {.user_key = target, .sequence = sequence_, .type = kValueTypeForSeek});
-    entries_.Seek(seek_key_);
+    entries_->Seek(seek_key_);
     FindNextUserEntry(/*skipping=*/false);
   }
 
   void Next() override {
     FORGEDB_DCHECK(valid_);
     // Skip the older versions of the key we are on, then find the next key.
-    skip_key_ = key_;
-    entries_.Next();
+    skip_key_.assign(key_);
+    entries_->Next();
     FindNextUserEntry(/*skipping=*/true);
   }
 
@@ -49,7 +52,10 @@ class DBIter final : public Iterator {
     FORGEDB_DCHECK(valid_);
     return value_;
   }
-  [[nodiscard]] Status status() const override { return Status::OK(); }  // memory can't fail
+  // OK, the first malformed entry, or the entries' error (a damaged table).
+  [[nodiscard]] Status status() const override {
+    return status_.ok() ? entries_->status() : status_;
+  }
 
  private:
   // Advances `entries_` to the newest visible value of a user key that is not
@@ -61,40 +67,49 @@ class DBIter final : public Iterator {
   // instead of stepping. `user_key` is the current entry's user key.
   void SkipAheadBySeeking(bool skipping, std::string_view user_key, SequenceNumber entry_sequence);
 
-  MemTableRef memtable_;  // keeps the entries (and the views below) alive
-  MemTable::Iterator entries_;
+  std::shared_ptr<const void> pin_;    // keeps what the entries read from alive (the Version)
+  std::unique_ptr<Iterator> entries_;  // internal keys, in order
   SequenceNumber sequence_;
 
   bool valid_ = false;
-  // Views into the memtable's arena, which outlives this iterator's use.
+  Status status_;  // a malformed entry; sticky
+  // Views into the entry entries_ is positioned at; valid until it moves.
   std::string_view key_;
   std::string_view value_;
-  std::string_view skip_key_;
+  // A copy: the scan moves on while still skipping this key's versions.
+  std::string skip_key_;
   std::string seek_key_;  // scratch buffer for building seek targets
 };
 
 void DBIter::FindNextUserEntry(bool skipping) {
+  valid_ = false;
+  if (!status_.ok()) {
+    return;
+  }
   std::size_t skipped = 0;
-  while (entries_.Valid()) {
-    // Entries come from this process's memtable, so they are well-formed.
-    const std::string_view internal_key = entries_.key();
-    const std::string_view user_key = ExtractUserKey(internal_key);
-    const std::uint64_t tag = ExtractTag(internal_key);
-    const SequenceNumber entry_sequence = tag >> 8;
-    const auto type = static_cast<ValueType>(tag & 0xFFU);
+  while (entries_->Valid()) {
+    // Table entries passed a CRC, but parse them as untrusted anyway.
+    const std::optional<ParsedInternalKey> parsed = ParseInternalKey(entries_->key());
+    if (!parsed) {
+      status_ = Status::Corruption("malformed internal key in the database");
+      return;
+    }
+    const std::string_view user_key = parsed->user_key;
+    const SequenceNumber entry_sequence = parsed->sequence;
+    const ValueType type = parsed->type;
 
     if (entry_sequence <= sequence_) {
       if (skipping && user_key == skip_key_) {
         // An older version of a key already returned or deleted: skip.
       } else if (type == ValueType::kDeletion) {
         // The newest visible version is a deletion: hide this key entirely.
-        skip_key_ = user_key;
+        skip_key_.assign(user_key);
         skipping = true;
       } else {
         // The newest visible version is a value: that's the next user key.
         valid_ = true;
         key_ = user_key;
-        value_ = entries_.value();
+        value_ = entries_->value();
         return;
       }
     }
@@ -104,10 +119,9 @@ void DBIter::FindNextUserEntry(bool skipping) {
       SkipAheadBySeeking(skipping, user_key, entry_sequence);
       skipped = 0;
     } else {
-      entries_.Next();
+      entries_->Next();
     }
   }
-  valid_ = false;
 }
 
 void DBIter::SkipAheadBySeeking(bool skipping, std::string_view user_key,
@@ -117,7 +131,7 @@ void DBIter::SkipAheadBySeeking(bool skipping, std::string_view user_key,
     if (entry_sequence == 0) {
       // The target below would be this very entry; the DB never writes
       // sequence 0, but stepping keeps the loop finite regardless.
-      entries_.Next();
+      entries_->Next();
       return;
     }
     // Past every version of skip_key_: tag 0 (sequence 0, deletion) is the
@@ -134,14 +148,16 @@ void DBIter::SkipAheadBySeeking(bool skipping, std::string_view user_key,
   }
   // Both targets sort strictly after the current entry (whose sequence is
   // > 0 in the first case, > sequence_ in the second), so this always
-  // makes progress.
-  entries_.Seek(seek_key_);
+  // makes progress. (user_key may point into the entry; it is copied into
+  // seek_key_ before the move.)
+  entries_->Seek(seek_key_);
 }
 
 }  // namespace
 
-std::unique_ptr<Iterator> NewDBIterator(MemTableRef memtable, SequenceNumber sequence) {
-  return std::make_unique<DBIter>(std::move(memtable), sequence);
+std::unique_ptr<Iterator> NewDBIterator(std::unique_ptr<Iterator> entries, SequenceNumber sequence,
+                                        std::shared_ptr<const void> pin) {
+  return std::make_unique<DBIter>(std::move(entries), sequence, std::move(pin));
 }
 
 }  // namespace forgedb

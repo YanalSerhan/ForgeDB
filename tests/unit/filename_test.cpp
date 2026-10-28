@@ -17,6 +17,7 @@ TEST(FileNameTest, Names) {
   EXPECT_EQ(TableFileName("db", 7).generic_string(), "db/000007.sst");
   EXPECT_EQ(DescriptorFileName("db", 3).generic_string(), "db/MANIFEST-000003");
   EXPECT_EQ(CurrentFileName("db").generic_string(), "db/CURRENT");
+  EXPECT_EQ(CurrentTempFileName("db").generic_string(), "db/CURRENT.tmp");
   EXPECT_EQ(LockFileName("db").generic_string(), "db/LOCK");
   EXPECT_EQ(LogFileName("db", 1234567).filename().generic_string(), "1234567.log")
       << "more than six digits: no padding";
@@ -36,6 +37,8 @@ TEST(FileNameTest, EveryNameParsesBack) {
               (ParsedFileName{.type = FileType::kDescriptor, .number = number}));
   }
   EXPECT_EQ(ParseFileName("CURRENT"), (ParsedFileName{.type = FileType::kCurrent, .number = 0}));
+  EXPECT_EQ(ParseFileName("CURRENT.tmp"),
+            (ParsedFileName{.type = FileType::kCurrentTemp, .number = 0}));
   EXPECT_EQ(ParseFileName("LOCK"), (ParsedFileName{.type = FileType::kLock, .number = 0}));
 }
 
@@ -63,7 +66,8 @@ TEST(FileNameTest, AnythingElseIsNotADatabaseFile) {
            "MANIFEST-5",                 // too few digits
            "MANIFEST-000005x",           // trailing junk
            "manifest-000005",            // case matters
-           "CURRENT.tmp",                // not CURRENT
+           "CURRENT.tmp2",               // not CURRENT.tmp
+           "CURRENT.TMP",                // case matters
            "current",                    // case matters
            "LOCK2",                      // not LOCK
        }) {

@@ -2,14 +2,38 @@
 //
 // Each struct starts empty and gains fields only when the engine can honour
 // them, so nothing here is a setting that silently does nothing:
-//   Options:       buffer sizes, block cache (Phases 2-3)
+//   Options:       buffer sizes, caches, table settings (Phase 3)
 //   ReadOptions:   `snapshot`, read as of an earlier point in time (Phase 4)
 #pragma once
 
+#include <cstddef>
+
 namespace forgedb {
 
-// How to open a database. Phase 1 has no settings yet.
-struct Options {};
+// How to open a database. DB::Open checks every field (InvalidArgument if one
+// is out of range).
+struct Options {
+  // When the memtable's memory reaches this, its contents are written to a
+  // new table file and a new memtable and log start. Larger: fewer, larger
+  // tables and longer recovery replays. At least 1; values below a few KiB
+  // flush after nearly every write, which only tests want.
+  std::size_t memtable_bytes = std::size_t{4} << 20;
+
+  // Memory for recently read table blocks, shared by all tables; 0 disables
+  // the block cache.
+  std::size_t block_cache_bytes = std::size_t{8} << 20;
+
+  // Table files kept open (each holds its index and bloom filter in memory).
+  // At least 1.
+  std::size_t max_open_tables = 1000;
+
+  // Bloom filter bits per key in new tables (about 0.8% false positives at
+  // 10); 0 writes tables without filters. At most 30.
+  int filter_bits_per_key = 10;
+
+  // Target size of the data blocks in new tables, in bytes. 256 B to 1 MiB.
+  std::size_t block_size = 4096;
+};
 
 // Per-write settings.
 struct WriteOptions {

@@ -2,8 +2,13 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <memory>
+#include <string_view>
+#include <utility>
 
 #include "forgedb/check.h"
+#include "forgedb/iterator.h"
+#include "forgedb/status.h"
 
 #include "util/coding.h"
 
@@ -149,5 +154,31 @@ void MemTable::Iterator::Seek(std::string_view internal_key) {
 std::string_view MemTable::Iterator::key() const noexcept { return DecodeInternalKey(it_.key()); }
 
 std::string_view MemTable::Iterator::value() const noexcept { return DecodeEntry(it_.key()).value; }
+
+namespace {
+
+class MemTableIteratorAdapter final : public Iterator {
+ public:
+  explicit MemTableIteratorAdapter(MemTableRef memtable)
+      : memtable_(std::move(memtable)), it_(&*memtable_) {}
+
+  [[nodiscard]] bool Valid() const override { return it_.Valid(); }
+  void SeekToFirst() override { it_.SeekToFirst(); }
+  void Seek(std::string_view target) override { it_.Seek(target); }
+  void Next() override { it_.Next(); }
+  [[nodiscard]] std::string_view key() const override { return it_.key(); }
+  [[nodiscard]] std::string_view value() const override { return it_.value(); }
+  [[nodiscard]] Status status() const override { return Status::OK(); }
+
+ private:
+  MemTableRef memtable_;  // declared first: it_ points into the memtable
+  MemTable::Iterator it_;
+};
+
+}  // namespace
+
+std::unique_ptr<Iterator> NewMemTableIterator(MemTableRef memtable) {
+  return std::make_unique<MemTableIteratorAdapter>(std::move(memtable));
+}
 
 }  // namespace forgedb

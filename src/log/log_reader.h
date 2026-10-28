@@ -58,9 +58,23 @@ class Reader {
   struct TornTail {
     std::uint64_t offset = 0;
     std::string reason;
+    // Point-in-time mode only: valid log data followed the problem (strict
+    // mode would have reported Corruption), and it was dropped with the tail.
+    bool valid_data_dropped = false;
   };
 
-  explicit Reader(std::unique_ptr<SequentialFile> file);
+  // How a problem followed by valid data is handled.
+  enum class Mode : std::uint8_t {
+    // Mid-log corruption: ReadRecord returns Corruption (ADR 0004).
+    kStrict,
+    // The log ends at its first problem, whatever follows it, and the
+    // records after it are dropped and reported through IgnoredTail(). For
+    // the newest log at open, once its recovered prefix is flushed to a table
+    // (ADR 0004, rule 6).
+    kPointInTime,
+  };
+
+  explicit Reader(std::unique_ptr<SequentialFile> file, Mode mode = Mode::kStrict);
 
   // The next record, or nullopt at the end of the log (including after an
   // ignored torn tail). The view is valid until the next call. Corruption for
@@ -99,8 +113,12 @@ class Reader {
   [[nodiscard]] Result<std::optional<std::string_view>> ClassifyProblem(std::uint64_t tail_offset);
   // A finished log: every later ReadRecord returns `status` (OK = end of log).
   Result<std::optional<std::string_view>> Finish(Status status);
+  // Mid-log damage: `corruption` in strict mode; in point-in-time mode the
+  // log ends at `tail_offset` and the damage is reported as an ignored tail.
+  Result<std::optional<std::string_view>> Damaged(Status corruption, std::uint64_t tail_offset);
 
   std::unique_ptr<SequentialFile> file_;
+  Mode mode_;
   std::string block_;                    // the current block (up to kBlockSize bytes)
   std::size_t block_position_ = 0;       // next unread byte in block_
   std::uint64_t block_file_offset_ = 0;  // file offset of block_[0]

@@ -12,9 +12,10 @@
 // once. Iterators are not shared: each is used by one thread at a time.
 //
 // Storage: every write is appended to a write-ahead log in the directory
-// `name` before it is applied, and opening the database replays the logs.
-// Only one DB object may have a database open at a time, in any process.
-// Phase 2: all data also stays in memory (Phase 3 adds table files).
+// `name` before it is applied to an in-memory table (the memtable). A full
+// memtable is written to an immutable, sorted table file, recorded in the
+// MANIFEST; opening the database replays the logs written since. Only one DB
+// object may have a database open at a time, in any process.
 #pragma once
 
 #include <cstddef>
@@ -40,9 +41,12 @@ inline constexpr std::size_t kMaxValueSize = std::size_t{256} * 1024 * 1024;  //
 class DB {
  public:
   // Opens (creating if needed) the database in directory `name`, and recovers
-  // every write from its logs. Errors: InvalidArgument if `name` is empty;
-  // Busy if the database is already open; Corruption if a log is damaged
-  // anywhere but at its end; the file system's error if a file can't be used.
+  // every write from its MANIFEST, tables and logs. Errors: InvalidArgument
+  // if `name` is empty or an option is out of range; Busy if the database is
+  // already open; Corruption if the MANIFEST, a listed table, or a log other
+  // than the newest is damaged (the newest log is cut at its first problem,
+  // which only drops writes made after it); the file system's error if a
+  // file can't be used.
   [[nodiscard]] static Result<std::unique_ptr<DB>> Open(const Options& options,
                                                         const std::filesystem::path& name);
 

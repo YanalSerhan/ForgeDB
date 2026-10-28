@@ -4,6 +4,7 @@
 //   000007.sst        table file number 7                    (Phase 3)
 //   MANIFEST-000003   descriptor (MANIFEST) number 3         (Phase 3.6)
 //   CURRENT           names the current MANIFEST             (Phase 3.6)
+//   CURRENT.tmp       the next CURRENT, before its rename    (Phase 3.6)
 //   LOCK              held while the database is open
 //
 // File numbers come from one counter, so a number identifies one file of any
@@ -24,6 +25,7 @@ enum class FileType : std::uint8_t {
   kTable,
   kDescriptor,
   kCurrent,
+  kCurrentTemp,
   kLock,
 };
 
@@ -34,11 +36,12 @@ enum class FileType : std::uint8_t {
 [[nodiscard]] std::filesystem::path DescriptorFileName(const std::filesystem::path& db,
                                                        std::uint64_t number);
 [[nodiscard]] std::filesystem::path CurrentFileName(const std::filesystem::path& db);
+[[nodiscard]] std::filesystem::path CurrentTempFileName(const std::filesystem::path& db);
 [[nodiscard]] std::filesystem::path LockFileName(const std::filesystem::path& db);
 
 struct ParsedFileName {
   FileType type = FileType::kLog;
-  std::uint64_t number = 0;  // 0 for CURRENT and LOCK
+  std::uint64_t number = 0;  // 0 for CURRENT, CURRENT.tmp and LOCK
 
   friend bool operator==(const ParsedFileName&, const ParsedFileName&) = default;
 };

@@ -64,8 +64,10 @@ int Run(const std::filesystem::path& db_dir, const std::filesystem::path& side_f
   using forgedb::process_kill::kMaxBatchKeys;
   using forgedb::process_kill::ValueFor;
 
-  forgedb::Result<std::unique_ptr<forgedb::DB>> opened =
-      forgedb::DB::Open(forgedb::Options{}, db_dir);
+  // A small memtable, so kills also land during flushes (Phase 3.9).
+  forgedb::Options options;
+  options.memtable_bytes = std::size_t{64} << 10;
+  forgedb::Result<std::unique_ptr<forgedb::DB>> opened = forgedb::DB::Open(options, db_dir);
   if (!opened.ok()) {
     return Fail(3, "open", opened.status());
   }

@@ -10,9 +10,9 @@ ForgeDB is a crash-safe, embedded key-value storage engine based on a log-struct
 log with group commit, live in a lock-free-read skip list memtable, and are flushed to immutable
 sorted table files that are compacted in the background; a MANIFEST tracks every live file so the
 database recovers to a consistent state after a crash. The core library has no third-party
-dependencies. **Status: Phase 2 (write-ahead log and crash recovery).** Data lives in the memtable
-and the log until Phase 3 adds table files; not for production use. See [TODO.md](TODO.md) for the
-plan.
+dependencies. **Status: Phase 3 (table files, flush and MANIFEST).** Memtables are flushed to
+level-0 table files recorded in the MANIFEST; nothing compacts them yet (Phase 4), so reads slow
+down as level-0 tables accumulate. Not for production use. See [TODO.md](TODO.md) for the plan.
 
 ## Building on Windows
 

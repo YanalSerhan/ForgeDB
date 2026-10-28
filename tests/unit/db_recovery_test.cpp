@@ -1,6 +1,12 @@
 // Opening an existing database: LOCK, and recovery from the write-ahead logs
-// (TODO 2.3). Everything runs on an in-memory file system that outlives the
-// DB objects, so "close and reopen" keeps the files, like a process restart.
+// (TODO 2.3, 3.6). Everything runs on an in-memory file system that outlives
+// the DB objects, so "close and reopen" keeps the files, like a process
+// restart.
+//
+// File numbers in a new database: the first open writes log 1 and MANIFEST 2.
+// Each later open replays the logs, writes what it recovered to a table, then
+// a new log and a new MANIFEST, each with the next file number, and deletes
+// the files it replaced.
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -8,6 +14,7 @@
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -132,7 +139,11 @@ TEST_F(RecoveryTest, ReopenSeesEveryWrite) {
   EXPECT_EQ(Info(*db).logs_replayed, std::vector<std::uint64_t>({1}));
   EXPECT_EQ(Info(*db).records_replayed, 4U);
   EXPECT_TRUE(Info(*db).torn_tails.empty());
-  EXPECT_EQ(Info(*db).new_log_number, 2U);
+  EXPECT_EQ(Info(*db).manifest.manifest_used, 2U);
+  EXPECT_EQ(Info(*db).table_written, 3U);
+  EXPECT_EQ(Info(*db).new_log_number, 4U);
+  EXPECT_EQ(Info(*db).new_manifest_number, 5U);
+  EXPECT_EQ(Info(*db).files_deleted, (std::vector<std::string>({"000001.log", "MANIFEST-000002"})));
 }
 
 TEST_F(RecoveryTest, SeveralSessionsReplayInOrderAndSequencesContinue) {
@@ -145,7 +156,9 @@ TEST_F(RecoveryTest, SeveralSessionsReplayInOrderAndSequencesContinue) {
   const std::unique_ptr<DB> db = OpenOrDie();
   EXPECT_EQ(Get(*db, "key"), "session 3") << "later logs win";
   EXPECT_EQ(Scan(*db), "key=session 3 s1=x s2=x s3=x ");
-  EXPECT_EQ(Info(*db).logs_replayed, std::vector<std::uint64_t>({1, 2, 3}));
+  // Only the last session's log is left; the others are in tables 3, 6, 9.
+  EXPECT_EQ(Info(*db).logs_replayed, std::vector<std::uint64_t>({7}));
+  EXPECT_EQ(dynamic_cast<DBImpl&>(*db).CurrentVersionForTesting()->files[0].size(), 3U);
   EXPECT_EQ(LastSequence(*db), 6U);
 }
 
@@ -156,16 +169,20 @@ TEST_F(RecoveryTest, AnEmptyLogIsFine) {
   const std::unique_ptr<DB> db = OpenOrDie();
   EXPECT_EQ(Scan(*db), "");
   EXPECT_EQ(Info(*db).logs_replayed, std::vector<std::uint64_t>({1}));
-  EXPECT_EQ(Info(*db).new_log_number, 2U);
+  EXPECT_EQ(Info(*db).table_written, std::nullopt) << "nothing to write";
+  EXPECT_EQ(Info(*db).new_log_number, 3U);
 }
 
+// A directory with logs and no MANIFEST (a Phase 2 database) replays them all.
 TEST_F(RecoveryTest, GapsInLogNumbersAreFine) {
   WriteLogOfBatches(4, {{1, PutBatch("a", "1")}});
   WriteLogOfBatches(9, {{2, PutBatch("b", "2")}});
   const std::unique_ptr<DB> db = OpenOrDie();
   EXPECT_EQ(Scan(*db), "a=1 b=2 ");
+  EXPECT_EQ(Info(*db).manifest.manifest_used, std::nullopt);
   EXPECT_EQ(Info(*db).logs_replayed, std::vector<std::uint64_t>({4, 9}));
-  EXPECT_EQ(Info(*db).new_log_number, 10U);
+  EXPECT_EQ(Info(*db).table_written, 10U) << "numbers continue above the highest file";
+  EXPECT_EQ(Info(*db).new_log_number, 11U);
 }
 
 TEST_F(RecoveryTest, OtherFilesInTheDirectoryAreLeftAlone) {
@@ -184,7 +201,7 @@ TEST_F(RecoveryTest, OtherFilesInTheDirectoryAreLeftAlone) {
 
 // --- Crash leftovers and damage ------------------------------------------------------
 
-TEST_F(RecoveryTest, TornTailIsIgnoredNowAndInLaterRecoveries) {
+TEST_F(RecoveryTest, TornTailIsIgnoredAndItsLogRetired) {
   {
     const std::unique_ptr<DB> db = OpenOrDie();
     ASSERT_TRUE(db->Put({}, "a", "1").ok());
@@ -198,24 +215,48 @@ TEST_F(RecoveryTest, TornTailIsIgnoredNowAndInLaterRecoveries) {
     EXPECT_EQ(Scan(*db), "a=1 ");
     ASSERT_EQ(Info(*db).torn_tails.size(), 1U);
     EXPECT_EQ(Info(*db).torn_tails[0].log_number, 1U);
+    EXPECT_FALSE(Info(*db).torn_tails[0].valid_data_dropped);
     EXPECT_EQ(LastSequence(*db), 1U);
-    ASSERT_TRUE(db->Put({}, "c", "3").ok());  // continues at sequence 2, in log 2
+    ASSERT_TRUE(db->Put({}, "c", "3").ok());  // continues at sequence 2, in log 4
   }
-  // The torn tail is still in log 1; it is ignored again, and log 2 continues
-  // the sequence exactly.
+  // Log 1's recovered prefix went into table 3 and log 1 was deleted, so the
+  // torn tail is never seen again.
+  EXPECT_FALSE(*fs_->FileExists(LogFileName(db_, 1)));
   const std::unique_ptr<DB> db = OpenOrDie();
   EXPECT_EQ(Scan(*db), "a=1 c=3 ");
-  EXPECT_EQ(Info(*db).logs_replayed, std::vector<std::uint64_t>({1, 2}));
-  EXPECT_EQ(Info(*db).torn_tails.size(), 1U);
+  EXPECT_EQ(Info(*db).logs_replayed, std::vector<std::uint64_t>({4}));
+  EXPECT_TRUE(Info(*db).torn_tails.empty());
   EXPECT_EQ(LastSequence(*db), 2U);
 }
 
-TEST_F(RecoveryTest, MidLogCorruptionFailsTheOpen) {
+// The newest log stops at its first problem, even with valid data after it
+// (point-in-time recovery, ADR 0004 rule 6); the dropped part is reported.
+TEST_F(RecoveryTest, DamageInTheNewestLogIsPointInTime) {
   {
     const std::unique_ptr<DB> db = OpenOrDie();
     ASSERT_TRUE(db->Put({}, "a", "1").ok());
     ASSERT_TRUE(db->Put({}, "b", "2").ok());
+    ASSERT_TRUE(db->Put({}, "c", "3").ok());
   }
+  std::string log = FileContents(LogFileName(db_, 1));
+  // Each record is 24 bytes: a 7-byte header and a 17-byte batch (12-byte
+  // header, then 0x01, key length, key, value length, value). Damage the second.
+  log[24 + 10] = static_cast<char>(log[24 + 10] ^ 0x01);
+  WriteFile(LogFileName(db_, 1), log);
+
+  const std::unique_ptr<DB> db = OpenOrDie();
+  EXPECT_EQ(Scan(*db), "a=1 ");
+  ASSERT_EQ(Info(*db).torn_tails.size(), 1U);
+  EXPECT_EQ(Info(*db).torn_tails[0].offset, 24U);
+  EXPECT_TRUE(Info(*db).torn_tails[0].valid_data_dropped);
+  EXPECT_EQ(LastSequence(*db), 1U);
+}
+
+// Older logs are synced before a newer one starts, so damage there is
+// corruption (ADR 0004).
+TEST_F(RecoveryTest, MidLogCorruptionInAnOlderLogFailsTheOpen) {
+  WriteLogOfBatches(1, {{1, PutBatch("a", "1")}, {2, PutBatch("b", "2")}});
+  WriteLogOfBatches(2, {{3, PutBatch("c", "3")}});
   std::string log = FileContents(LogFileName(db_, 1));
   log[10] = static_cast<char>(log[10] ^ 0x01);  // inside the first record; the second is intact
   WriteFile(LogFileName(db_, 1), log);
@@ -241,7 +282,7 @@ TEST_F(RecoveryTest, SequenceGapAcrossLogsIsCorruption) {
   EXPECT_EQ(Open().status().code(), Status::Code::kCorruption);
 }
 
-// Phase 2 keeps every log, so the oldest one must start at sequence 1.
+// Without a MANIFEST every log is replayed, so the oldest must start at sequence 1.
 TEST_F(RecoveryTest, AFirstRecordAfterSequenceOneIsCorruption) {
   WriteLogOfBatches(1, {{7, PutBatch("a", "1")}});
   EXPECT_EQ(Open().status().code(), Status::Code::kCorruption);
@@ -272,6 +313,7 @@ TEST_F(RecoveryTest, EmptyBatchRecordsDoNotUseSequenceNumbers) {
 // never synced must be made durable before newer writes can depend on it.
 // Otherwise a power loss can drop the old log's tail while the new log's
 // synced writes survive, and the next open sees a gap in sequence numbers.
+// Since 3.6 the open writes the recovered data to a synced table.
 TEST(RecoveryDurabilityTest, RecoveredLogsAreSyncedBeforeNewWrites) {
   for (std::uint64_t seed = 1; seed <= 20; ++seed) {
     SCOPED_TRACE(seed);
@@ -296,13 +338,36 @@ TEST(RecoveryDurabilityTest, RecoveredLogsAreSyncedBeforeNewWrites) {
   }
 }
 
+// The same with renames and removals that may not survive (the default): a
+// power loss can undo the CURRENT switch and the deletion of the old files,
+// and recovery still uses the newest complete MANIFEST (ADR 0007).
+TEST(RecoveryDurabilityTest, UndoneCurrentSwitchIsHarmless) {
+  for (std::uint64_t seed = 1; seed <= 20; ++seed) {
+    SCOPED_TRACE(seed);
+    FaultInjectionFileSystem::Options options;
+    options.seed = seed;
+    const auto fs =
+        std::make_shared<FaultInjectionFileSystem>(std::make_shared<MemFileSystem>(), options);
+    for (int session = 0; session < 3; ++session) {
+      const std::unique_ptr<DB> db = std::move(OpenDB(Options{}, "db", fs)).value();
+      ASSERT_TRUE(db->Put({.sync = true}, "k" + std::to_string(session), "v").ok());
+    }
+    ASSERT_TRUE(fs->SimulateCrash(FaultInjectionFileSystem::CrashKind::kPowerLoss).ok());
+    const Result<std::unique_ptr<DB>> db = OpenDB(Options{}, "db", fs);
+    ASSERT_TRUE(db.ok()) << db.status().ToString();
+    EXPECT_EQ(Get(**db, "k0"), "v");
+    EXPECT_EQ(Get(**db, "k1"), "v");
+    EXPECT_EQ(Get(**db, "k2"), "v");
+  }
+}
+
 TEST(RecoveryDurabilityTest, ASyncFailureFailsTheOpen) {
   const auto fs = std::make_shared<FaultInjectionFileSystem>(std::make_shared<MemFileSystem>());
   {
     const std::unique_ptr<DB> db = std::move(OpenDB(Options{}, "db", fs)).value();
     ASSERT_TRUE(db->Put({}, "k", "v").ok());
   }
-  fs->FailNth(FaultInjectionFileSystem::Op::kSyncFile, 1);
+  fs->FailNth(FaultInjectionFileSystem::Op::kSync, 1);  // the recovered table's sync
   EXPECT_EQ(OpenDB(Options{}, "db", fs).status().code(), Status::Code::kIOError);
   const Result<std::unique_ptr<DB>> db = OpenDB(Options{}, "db", fs);
   ASSERT_TRUE(db.ok()) << "the failed open released LOCK: " << db.status().ToString();

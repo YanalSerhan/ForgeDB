@@ -24,9 +24,12 @@
 #include <compare>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
+
+#include "forgedb/iterator.h"
 
 #include "db/internal_key.h"
 #include "memtable/arena.h"
@@ -164,5 +167,10 @@ class MemTable::Iterator {
   Table::Iterator it_;
   std::string seek_buffer_;  // Seek's target, in memtable-key form
 };
+
+// Every entry of `memtable` (internal key -> value) as a forgedb::Iterator,
+// which the merging iterator can combine with table iterators. Holds a
+// reference, so the memtable lives as long as the iterator. Never fails.
+[[nodiscard]] std::unique_ptr<Iterator> NewMemTableIterator(MemTableRef memtable);
 
 }  // namespace forgedb
