@@ -9,10 +9,12 @@ configure_file(
   @ONLY)
 
 add_library(forgedb STATIC
+  db/compaction.cpp
   db/db_impl.cpp
   db/db_iter.cpp
   db/filename.cpp
   db/internal_key.cpp
+  db/level_iterator.cpp
   db/snapshot.cpp
   db/table_cache.cpp
   db/version_edit.cpp

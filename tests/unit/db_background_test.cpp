@@ -2,8 +2,9 @@
 // wait only when the memtable fills again before the flush is done; errors
 // and shutdown.
 //
-// A gate in front of the file system holds every table's Sync until the test
-// opens it, so a flush can be kept running for as long as a test needs.
+// A gate in front of the file system (support/gated_file_system.h) holds
+// every table's Sync until the test opens it, so a flush can be kept running
+// for as long as a test needs.
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -27,114 +28,11 @@
 #include "forgedb/status.h"
 
 #include "db/db_impl.h"
-#include "env/file_system.h"
 #include "env/mem_file_system.h"
+#include "support/gated_file_system.h"
 
 namespace forgedb {
 namespace {
-
-// Holds table syncs (files ending in .sst) while closed.
-class Gate {
- public:
-  void Close() {
-    const std::scoped_lock lock(mutex_);
-    open_ = false;
-  }
-  // Opens the gate; the held syncs return `result`.
-  void Open(Status result = Status::OK()) {
-    {
-      const std::scoped_lock lock(mutex_);
-      open_ = true;
-      result_ = std::move(result);
-    }
-    cv_.notify_all();
-  }
-  Status Pass() {
-    std::unique_lock lock(mutex_);
-    ++waiting_;
-    cv_.notify_all();
-    cv_.wait(lock, [this] { return open_; });
-    --waiting_;
-    return result_;
-  }
-  // Waits until a sync is held at the gate.
-  void WaitForArrival() {
-    std::unique_lock lock(mutex_);
-    cv_.wait(lock, [this] { return waiting_ > 0; });
-  }
-
- private:
-  std::mutex mutex_;
-  std::condition_variable cv_;
-  bool open_ = true;
-  int waiting_ = 0;
-  Status result_;
-};
-
-class GatedFile final : public WritableFile {
- public:
-  GatedFile(std::unique_ptr<WritableFile> base, Gate* gate) : base_(std::move(base)), gate_(gate) {}
-  Status Append(std::string_view data) override { return base_->Append(data); }
-  Status Flush() override { return base_->Flush(); }
-  Status Sync() override {
-    FORGEDB_RETURN_IF_ERROR(gate_->Pass());
-    return base_->Sync();
-  }
-  Status Close() override { return base_->Close(); }
-
- private:
-  std::unique_ptr<WritableFile> base_;
-  Gate* gate_;
-};
-
-class GatedFileSystem final : public FileSystem {
- public:
-  GatedFileSystem(std::shared_ptr<FileSystem> base, Gate* gate)
-      : base_(std::move(base)), gate_(gate) {}
-
-  Result<std::unique_ptr<WritableFile>> NewWritableFile(
-      const std::filesystem::path& path) override {
-    FORGEDB_ASSIGN_OR_RETURN(std::unique_ptr<WritableFile> file, base_->NewWritableFile(path));
-    if (path.extension() == ".sst") {
-      return std::unique_ptr<WritableFile>(std::make_unique<GatedFile>(std::move(file), gate_));
-    }
-    return file;
-  }
-  Result<std::unique_ptr<SequentialFile>> NewSequentialFile(
-      const std::filesystem::path& path) override {
-    return base_->NewSequentialFile(path);
-  }
-  Result<std::unique_ptr<RandomAccessFile>> NewRandomAccessFile(
-      const std::filesystem::path& path) override {
-    return base_->NewRandomAccessFile(path);
-  }
-  Status RenameReplace(const std::filesystem::path& from,
-                       const std::filesystem::path& to) override {
-    return base_->RenameReplace(from, to);
-  }
-  Status RemoveFile(const std::filesystem::path& path) override { return base_->RemoveFile(path); }
-  Result<bool> FileExists(const std::filesystem::path& path) override {
-    return base_->FileExists(path);
-  }
-  Result<std::vector<std::string>> GetChildren(const std::filesystem::path& dir) override {
-    return base_->GetChildren(dir);
-  }
-  Result<std::uint64_t> GetFileSize(const std::filesystem::path& path) override {
-    return base_->GetFileSize(path);
-  }
-  Status SyncFile(const std::filesystem::path& path) override { return base_->SyncFile(path); }
-  Status CreateDir(const std::filesystem::path& path) override { return base_->CreateDir(path); }
-  Result<std::unique_ptr<FileLock>> LockFile(const std::filesystem::path& path) override {
-    return base_->LockFile(path);
-  }
-  Status UnlockFile(std::unique_ptr<FileLock> lock) override {
-    return base_->UnlockFile(std::move(lock));
-  }
-
- private:
-  std::shared_ptr<FileSystem> base_;
-  Gate* gate_;
-};
 
 std::string Key(int i) {
   const std::string digits = std::to_string(i);
@@ -241,7 +139,7 @@ class BackgroundTest : public testing::Test {
 TEST_F(BackgroundTest, WritesGoOnWhileAFlushRunsAndWaitOnlyWhenTheMemtableFillsAgain) {
   const std::unique_ptr<DB> db = Open();
   WriteUntilAFlushIsHeld(*db);
-  EXPECT_EQ(Impl(*db).GetStalls().count, 0U);
+  EXPECT_EQ(Impl(*db).GetStalls().memtable_full.count, 0U);
 
   // A writer fills the new memtable, then has to wait for the held flush.
   Writer writer(db.get(), next_, 500);
@@ -256,7 +154,7 @@ TEST_F(BackgroundTest, WritesGoOnWhileAFlushRunsAndWaitOnlyWhenTheMemtableFillsA
   writer.Join();
   ASSERT_TRUE(writer.Failure().ok()) << writer.Failure().ToString();
   next_ += 500;
-  EXPECT_GE(Impl(*db).GetStalls().count, 1U);
+  EXPECT_GE(Impl(*db).GetStalls().memtable_full.count, 1U);
   Impl(*db).WaitForFlushForTesting();
   EXPECT_GE(Impl(*db).FlushesForTesting(), 2U);
   for (int i = 0; i < next_; ++i) {
@@ -322,7 +220,7 @@ TEST_F(BackgroundTest, SynchronousFlushHookWaitsForTheFlush) {
     ASSERT_EQ(Impl(*db).FlushesForTesting(), flushes) << i;
   }
   EXPECT_GE(flushes, 3U);
-  EXPECT_EQ(Impl(*db).GetStalls().count, 0U);
+  EXPECT_EQ(Impl(*db).GetStalls().memtable_full.count, 0U);
 }
 
 }  // namespace

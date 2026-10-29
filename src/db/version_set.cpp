@@ -115,7 +115,7 @@ void VersionSet::AdoptScalars(const VersionEdit& edit) noexcept {
     log_number_ = *edit.log_number;
   }
   if (edit.next_file_number) {
-    next_file_number_ = std::max(next_file_number_, *edit.next_file_number);
+    next_file_number_.store(std::max(next_file_number_.load(), *edit.next_file_number));
   }
   if (edit.last_sequence) {
     last_sequence_ = *edit.last_sequence;
@@ -125,7 +125,7 @@ void VersionSet::AdoptScalars(const VersionEdit& edit) noexcept {
 VersionEdit VersionSet::Snapshot(const Version& version) const {
   VersionEdit snapshot;
   snapshot.log_number = log_number_;
-  snapshot.next_file_number = next_file_number_;
+  snapshot.next_file_number = next_file_number_.load();
   snapshot.last_sequence = last_sequence_;
   for (std::size_t level = 0; level < version.files.size(); ++level) {
     for (const FileMetaData& file : version.files[level]) {
@@ -259,7 +259,7 @@ Status VersionSet::Recover(const std::vector<std::string>& children, ManifestRec
     return Status::NotSupported("file numbers exhausted",
                                 "a file number or the MANIFEST's next file number is 2^63 or more");
   }
-  next_file_number_ = std::max(next_file_number_, highest_number + 1);
+  next_file_number_.store(std::max(next_file_number_.load(), highest_number + 1));
   return Status::OK();
 }
 
@@ -311,7 +311,10 @@ Status VersionSet::LogAndApply(VersionEdit edit) {
   if (!edit.last_sequence) {
     edit.last_sequence = last_sequence_;
   }
-  edit.next_file_number = next_file_number_;
+  // A file number the leader takes for a new log right after this may be
+  // missing from the record; recovery also takes numbers above every file in
+  // the directory, so it is never reused.
+  edit.next_file_number = next_file_number_.load();
   FORGEDB_ASSIGN_OR_RETURN(std::shared_ptr<Version> version, Apply(*current_, edit));
 
   std::string record;

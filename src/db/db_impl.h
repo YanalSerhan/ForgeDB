@@ -17,44 +17,59 @@
 //   last_sequence_, and entries above it are invisible, so a group appears
 //   all at once.
 //
-// Flush (Phase 3.5; in the background since 4.2)
+// Background work (Phases 3.5, 4.2, 4.3)
 //   Before writing, a leader that finds the memtable at memtable_bytes or
 //   more switches: it syncs the current log (so a crash can only damage the
 //   newest log, and recovery still yields a prefix of the writes), starts a
 //   new log, turns the memtable into the immutable memtable (imm_), hands it
-//   to the background thread and goes on writing. If imm_ is still there
-//   from the last switch (its flush is still running), the leader waits for
-//   it first: a stall, counted in stalls_.
+//   to the background thread and goes on writing.
 //
-//   The background thread writes imm_ to a new level-0 table, syncs it,
-//   records it in the MANIFEST (synced), installs the new Version and drops
-//   imm_. The old log is deleted one flush later, once another MANIFEST
-//   record follows the one that retired it (ADR 0007: a damaged last record
-//   is ignored, so the data it records must still be in a log). Readers keep
-//   reading imm_ until the table is installed.
+//   The background thread does one job at a time, flushes first:
+//   - Flush: writes imm_ to a new level-0 table, syncs it, records it in the
+//     MANIFEST (synced), installs the new Version and drops imm_. The old
+//     log is deleted one flush later, once another MANIFEST record follows
+//     the one that retired it (ADR 0007: a damaged last record is ignored,
+//     so the data it records must still be in a log).
+//   - Compaction, when a level scores 1 or more (db/compaction.h, ADR 0008):
+//     merges its inputs into tables one level down, dropping versions no
+//     reader can see, syncs them, and records the change in one MANIFEST
+//     edit. A long compaction runs a queued flush in between. Input tables
+//     are deleted once no version in use lists them and another MANIFEST
+//     record has followed the edit that removed them (the same reason).
 //
 //   Only the background thread uses the VersionSet after the open, except
-//   that the leader takes the new log's file number when it switches, which
-//   it does only while imm_ is empty, i.e. while no flush is running.
+//   that the write leader takes new file numbers for logs (an atomic
+//   counter).
+//
+// Write stalls (Phase 4.3)
+//   A writer waits when the memtable is full while the last flush still runs
+//   (stalls_.memtable_full). With level0_slowdown_writes_trigger level-0
+//   tables or more, each write first sleeps 1 ms, once, so compaction can
+//   catch up; with level0_stop_writes_trigger or more, a writer that needs a
+//   new memtable waits for a compaction to make room.
 //
 // Shutdown
 //   The destructor tells the background thread to stop and joins it. A flush
 //   that is running is finished; one that has not started is not: its writes
 //   are in the logs (the old one synced at the switch), which the next open
-//   replays.
+//   replays. A running compaction is abandoned at its next check; its
+//   unfinished tables are removed (or, failing that, by the next open).
 //
 // Reads
 //   A read takes, under mutex_, the memtable, imm_, the current Version and
 //   last_sequence_, then works without the lock. Get looks in the memtable,
-//   then imm_, then the level-0 tables newest first. An iterator merges all
-//   of them (NewMergingIterator) under the DB iterator, and holds the Version.
+//   then imm_, then the level-0 tables newest first, then the one table of
+//   each deeper level whose range holds the key. An iterator merges all of
+//   them (NewMergingIterator; a level iterator per deeper level) under the
+//   DB iterator, and holds the Version.
 //
 // Errors
-//   If appending, syncing or flushing fails, what is on disk is unknown.
-//   Every member of the group gets the error, and it becomes the sticky
-//   background_error_: every later write fails with it, including a writer
-//   waiting for a flush. Reads go on. Nothing is lost: a log is deleted only
-//   after the MANIFEST records its contents.
+//   If appending, syncing, flushing or compacting fails, what is on disk is
+//   unknown. Every member of the group gets the error, and it becomes the
+//   sticky background_error_: every later write fails with it, including a
+//   writer waiting for the background thread, which stops working. Reads go
+//   on. Nothing is lost: a log is deleted only after the MANIFEST records its
+//   contents, and a table only after the MANIFEST no longer lists it.
 //
 // Snapshots (Phase 4.1)
 //   A snapshot is a sequence number registered in snapshots_; a read with
@@ -73,6 +88,8 @@
 //   is recovered the same way, from all of its logs.
 #pragma once
 
+#include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -87,6 +104,7 @@
 
 #include "forgedb/db.h"
 
+#include "db/compaction.h"
 #include "db/internal_key.h"
 #include "db/snapshot.h"
 #include "db/table_cache.h"
@@ -153,10 +171,15 @@ class DBImpl final : public DB {
   [[nodiscard]] std::shared_ptr<const Version> CurrentVersion();
   [[nodiscard]] const RecoveryInfo& GetRecoveryInfo() const noexcept { return recovery_; }
 
-  // Times a writer had to wait for a flush to finish, and for how long.
-  struct Stalls {
+  // Times writes were held up, and for how long in total.
+  struct StallCounter {
     std::uint64_t count = 0;
     std::uint64_t microseconds = 0;
+  };
+  struct Stalls {
+    StallCounter memtable_full;    // the memtable was full while the last flush still ran
+    StallCounter level0_slowdown;  // 1 ms delays: level 0 at the slowdown trigger
+    StallCounter level0_stop;      // waits: level 0 at the stop trigger
   };
   [[nodiscard]] Stalls GetStalls();
 
@@ -168,10 +191,27 @@ class DBImpl final : public DB {
   // so the file operations of a run come in the same order every time (the
   // step-by-step crash tests need that).
   void SetSynchronousFlushForTesting(bool on);
-  // Waits until no flush is queued or running (or the background error is set).
+  // Waits until no flush is queued or running, and the background thread has
+  // finished its current job, file deletions included (or the background
+  // error is set).
   void WaitForFlushForTesting();
   // Whether a flush is queued or running (imm_ is set).
   [[nodiscard]] bool FlushPendingForTesting();
+  // Waits until the background thread has nothing to do: no flush, and no
+  // level scores 1 or more (or the background error is set).
+  void WaitForBackgroundWorkForTesting();
+  [[nodiscard]] std::uint64_t CompactionsForTesting();
+  // Flushes the memtable (switching logs like a full one) and waits for the
+  // background thread to be idle. Returns the background error, if any.
+  [[nodiscard]] Status FlushForTesting();
+  // Runs one compaction of `level` (0 to 5) on the background thread, if it
+  // has tables, whatever its score, without trivial moves, and waits for it.
+  [[nodiscard]] Status CompactLevelForTesting(int level);
+  // Flushes, then compacts every level down to the last one.
+  [[nodiscard]] Status CompactAllForTesting();
+  // While on, no compaction starts on its own (flushes and the manual ones
+  // above still run).
+  void SetCompactionsPausedForTesting(bool on);
 
  private:
   // A Write waiting in the queue.
@@ -180,8 +220,9 @@ class DBImpl final : public DB {
         : batch(writer_batch), sync(writer_sync) {}
     const WriteBatch* batch;
     bool sync;
-    bool done = false;  // set by the leader that wrote this writer's batch
-    Status status;      // valid once done
+    bool force_flush = false;  // FlushForTesting: switch memtables, write nothing
+    bool done = false;         // set by the leader that wrote this writer's batch
+    Status status;             // valid once done
     std::condition_variable cv;
   };
 
@@ -216,17 +257,38 @@ class DBImpl final : public DB {
   // waiting). Switches memtables if the memtable is full, waiting for the
   // previous flush first (see "Flush" at the top). Returns
   // background_error_ if it is set, or sets it if switching fails.
-  [[nodiscard]] Status MakeRoomForWrite(std::unique_lock<std::mutex>& lock);
+  // Also delays or stops writes while level 0 has too many tables (see
+  // "Write stalls"). `force` switches even a memtable that is not full.
+  [[nodiscard]] Status MakeRoomForWrite(std::unique_lock<std::mutex>& lock, bool force = false);
   [[nodiscard]] Status SwitchMemtable(std::unique_lock<std::mutex>& lock);
 
-  // The background thread's loop, and one flush (mutex_ not held).
+  // The background thread (see "Background work" at the top). mutex_ is held
+  // via `lock`, released around I/O.
   void BackgroundThread();
-  [[nodiscard]] Status RunFlush(const FlushJob& job);
+  [[nodiscard]] bool HasBackgroundWork() const;  // mutex_ held
+  [[nodiscard]] bool BackgroundIdle() const;     // mutex_ held
+  void DoFlush(std::unique_lock<std::mutex>& lock);
+  [[nodiscard]] Status RunFlush(const FlushJob& job);  // mutex_ not held
+  void DoCompaction(std::unique_lock<std::mutex>& lock, const Compaction& compaction, bool manual);
+  // Runs a compaction (mutex_ not held): writes its outputs and records them
+  // in the MANIFEST. Sets *abandoned if it stopped for shutdown.
+  [[nodiscard]] Status RunCompaction(const Compaction& compaction, bool allow_trivial_move,
+                                     bool* abandoned);
+  // Called by a running compaction now and then: runs a queued flush.
+  void FlushDuringCompaction();
+  // After every MANIFEST record: tables removed by the record before become
+  // deletable (ADR 0007 rule 5, ADR 0008).
+  void RecordEdit(const VersionEdit& edit);
+  // Deletes deletable tables no version uses any more, and retired logs.
+  void DeleteObsoleteBackgroundFiles(std::unique_lock<std::mutex>& lock);
 
   // Writes `memtable` to a new level-0 table, synced and closed, and adds it
   // to `edit`. Writes nothing for an empty memtable. Open or background
   // thread only.
   [[nodiscard]] Status WriteLevel0Table(MemTable& memtable, VersionEdit& edit);
+  // Writes `entries` (already positioned) to a new synced table; nullopt if
+  // it holds none. Removes the file on error.
+  [[nodiscard]] Result<std::optional<FileMetaData>> WriteTable(Iterator& entries);
 
   // Replays log `number` into `memtable`, continuing from `last_sequence`.
   [[nodiscard]] Status ReplayLog(std::uint64_t number, bool newest, MemTable& memtable,
@@ -255,17 +317,31 @@ class DBImpl final : public DB {
   SequenceNumber last_sequence_ = 0;        // guarded by mutex_
   std::uint64_t groups_written_ = 0;        // guarded by mutex_
   std::uint64_t flushes_ = 0;               // guarded by mutex_
+  std::uint64_t compactions_ = 0;           // guarded by mutex_
   Stalls stalls_;                           // guarded by mutex_
   std::optional<FlushJob> pending_flush_;   // guarded by mutex_; for the background thread
   bool shutting_down_ = false;              // guarded by mutex_
   bool synchronous_flush_ = false;          // guarded by mutex_
+  bool busy_ = false;                       // guarded by mutex_; a background job is running
+  bool compactions_paused_ = false;         // guarded by mutex_
+  std::optional<int> manual_level_;         // guarded by mutex_; CompactLevelForTesting
+  std::uint64_t manual_done_ = 0;           // guarded by mutex_; manual compactions finished
   // The log the last flush retired, kept until the next MANIFEST record.
   std::optional<std::uint64_t> retired_log_;  // guarded by mutex_
   std::condition_variable work_cv_;           // wakes the background thread
-  std::condition_variable done_cv_;           // a flush finished or failed: wakes waiting writers
+  std::condition_variable done_cv_;           // background work finished: wakes waiting writers
+  // Read without mutex_ by a running compaction.
+  std::atomic<bool> flush_queued_{false};
+  std::atomic<bool> stopping_{false};
   const std::shared_ptr<SnapshotList> snapshots_ = std::make_shared<SnapshotList>();
 
-  // Used by Recover(), then by the background thread (see "Flush").
+  // Background thread only (and Recover()).
+  CompactionPointers compaction_pointers_;
+  std::vector<std::uint64_t> removed_by_last_edit_;  // tables the last MANIFEST record removed
+  std::vector<std::uint64_t> deletable_tables_;      // removed by an earlier record
+  std::vector<std::uint64_t> logs_to_delete_;
+
+  // Used by Recover(), then by the background thread (see "Background work").
   std::unique_ptr<VersionSet> versions_;
   // Used only by Recover() and then by the current leader.
   std::unique_ptr<WritableFile> log_file_;

@@ -58,6 +58,15 @@ Options SmallMemtable() {
   return options;
 }
 
+// No compaction (Phase 4.3): every flush's table stays in level 0.
+Options SmallMemtableNoCompaction() {
+  Options options = SmallMemtable();
+  options.level0_compaction_trigger = 1 << 30;
+  options.level0_slowdown_writes_trigger = 1 << 30;
+  options.level0_stop_writes_trigger = 1 << 30;
+  return options;
+}
+
 class FlushTest : public testing::Test {
  protected:
   std::unique_ptr<DB> Open(const Options& options = SmallMemtable()) {
@@ -114,7 +123,7 @@ TEST(OptionsTest, OutOfRangeFieldsAreRejected) {
 // --- Flushing --------------------------------------------------------------------
 
 TEST_F(FlushTest, FullMemtablesAreFlushedAndEverythingStaysReadable) {
-  const std::unique_ptr<DB> db = Open();
+  const std::unique_ptr<DB> db = Open(SmallMemtableNoCompaction());
   for (int i = 0; i < 1000; ++i) {
     ASSERT_TRUE(db->Put({}, Key(i), Value(i)).ok());
   }
@@ -498,6 +507,61 @@ TEST(FlushCrashTest, ACrashAtAnyStepOfAFlushLosesNoSyncedWrite) {
       ASSERT_TRUE(fs->SimulateCrash(kind).ok());
       fs->ClearFaults();
       const Result<std::unique_ptr<DB>> db = OpenDB(SmallMemtable(), "db", fs);
+      ASSERT_TRUE(db.ok()) << db.status().ToString();
+      ExpectSyncedPrefix(**db, acknowledged, kWrites);
+    }
+  }
+}
+
+// TODO 4.3/4.5: the same through compactions: a tiny memtable, level 0
+// compacted at 2 tables, and small output tables, so the writes run two
+// compactions (into level 1, then a level-1 table into level 2): every step
+// of writing their tables, the MANIFEST edit and the deletion of the inputs
+// is crashed in turn.
+Options CompactingOptions() {
+  Options options = SmallMemtable();
+  options.memtable_bytes = std::size_t{8} << 10;
+  options.level0_compaction_trigger = 2;
+  options.max_bytes_for_level_base = std::size_t{12} << 10;
+  options.target_file_size = std::size_t{4} << 10;
+  options.block_size = 1024;
+  return options;
+}
+
+TEST(CompactionCrashTest, ACrashAtAnyStepOfACompactionLosesNoSyncedWrite) {
+  constexpr int kWrites = 160;
+  std::uint64_t total = 0;
+  {
+    const auto fs = NewFaultFs(1);
+    const std::unique_ptr<DB> db = std::move(OpenDB(CompactingOptions(), "db", fs)).value();
+    Impl(*db).SetSynchronousFlushForTesting(true);  // flushes and compactions in a fixed order
+    const std::uint64_t base = fs->OperationCount();
+    ASSERT_EQ(WriteSynced(*db, 0, kWrites), kWrites);
+    ASSERT_GE(Impl(*db).CompactionsForTesting(), 2U);
+    total = fs->OperationCount() - base;
+    std::printf(  // NOLINT(cppcoreguidelines-pro-type-vararg)
+        "[ crash    ] %llu writes with %llu flushes and %llu compactions: crashing at each of "
+        "%llu operations, twice\n",
+        static_cast<unsigned long long>(kWrites),
+        static_cast<unsigned long long>(Impl(*db).FlushesForTesting()),
+        static_cast<unsigned long long>(Impl(*db).CompactionsForTesting()),
+        static_cast<unsigned long long>(total));
+  }
+  for (std::uint64_t step = 1; step <= total; ++step) {
+    for (const CrashKind kind : {CrashKind::kPowerLoss, CrashKind::kProcessCrash}) {
+      SCOPED_TRACE("crash at operation " + std::to_string(step) + " of " + std::to_string(total) +
+                   (kind == CrashKind::kPowerLoss ? ", power loss" : ", process crash"));
+      const auto fs = NewFaultFs(step);
+      int acknowledged = 0;
+      {
+        const std::unique_ptr<DB> db = std::move(OpenDB(CompactingOptions(), "db", fs)).value();
+        Impl(*db).SetSynchronousFlushForTesting(true);
+        fs->CrashAtOperation(step);
+        acknowledged = WriteSynced(*db, 0, kWrites);
+      }
+      ASSERT_TRUE(fs->SimulateCrash(kind).ok());
+      fs->ClearFaults();
+      const Result<std::unique_ptr<DB>> db = OpenDB(CompactingOptions(), "db", fs);
       ASSERT_TRUE(db.ok()) << db.status().ToString();
       ExpectSyncedPrefix(**db, acknowledged, kWrites);
     }

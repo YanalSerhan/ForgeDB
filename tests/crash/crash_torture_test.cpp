@@ -217,16 +217,17 @@ struct Stats {
   std::size_t torn_tails = 0;            // recoveries that ignored a torn tail in the newest log
   std::size_t dropped_valid_data = 0;    // point-in-time: valid records after a problem
   std::size_t flushes = 0;               // memtable flushes while writing
+  std::size_t compactions = 0;           // compactions while writing
 
   void Print(const char* name) const {
     std::printf(  // NOLINT(cppcoreguidelines-pro-type-vararg)
         "[ stats    ] %s: %zu cycles: %zu power losses, %zu process crashes, %zu clean closes, "
         "%zu deaths mid-operation, %zu failed writes; recoveries: %zu lost unsynced writes, "
         "%zu kept a failed write, %zu ignored a torn tail, %zu dropped valid records after a "
-        "problem (point-in-time); %zu flushes\n",
+        "problem (point-in-time); %zu flushes, %zu compactions\n",
         name, cycles, power_losses, process_crashes, clean_closes, died_mid_operation,
         failed_writes, lost_unsynced_writes, kept_failed_write, torn_tails, dropped_valid_data,
-        flushes);
+        flushes, compactions);
   }
 };
 
@@ -330,9 +331,10 @@ class Torture {
     // 4. Before the crash, readers see exactly the acknowledged writes: not
     //    the failed one, even if part of it reached the log. Skipped if the
     //    simulated process died mid-operation: reads open table files
-    //    (Phase 3), and a dead process can do nothing. A background flush
-    //    still running could kill the process during the reads: wait for it.
-    dynamic_cast<DBImpl&>(*db_).WaitForFlushForTesting();
+    //    (Phase 3), and a dead process can do nothing. A background flush or
+    //    compaction still running could kill the process during the reads:
+    //    wait for it.
+    dynamic_cast<DBImpl&>(*db_).WaitForBackgroundWorkForTesting();
     const bool dead = fs_->ProcessIsDead();
     if (!dead) {
       State live = next.start;
@@ -348,6 +350,7 @@ class Torture {
     // 5. End the cycle.
     stats_->died_mid_operation += dead ? 1U : 0U;
     stats_->flushes += dynamic_cast<DBImpl&>(*db_).FlushesForTesting();
+    stats_->compactions += dynamic_cast<DBImpl&>(*db_).CompactionsForTesting();
     next.acknowledged = acknowledged;
     next.last_failed = failed;
     next.highest = acknowledged + (failed ? 1U : 0U);
@@ -584,6 +587,35 @@ TEST(CrashTortureTest, CrashesDuringBackgroundFlushes) {
   ExpectEverythingExercised(stats);
   if (stats.cycles >= 100) {
     EXPECT_GT(stats.flushes, stats.cycles) << "most cycles flushed at least once";
+  }
+}
+
+// TODO 4.3/4.5: tiny levels, so crashes land in compactions too: in writing
+// their tables, in their MANIFEST edits, and in deleting their inputs (with
+// renames and removals that a power loss may undo).
+TortureOptions WithCompactions() {
+  TortureOptions options = WithFlushes();
+  options.db.level0_compaction_trigger = 2;
+  options.db.max_bytes_for_level_base = std::size_t{64} << 10;
+  options.db.target_file_size = std::size_t{16} << 10;
+  return options;
+}
+
+TEST(CrashTortureTest, CrashesDuringCompactions) {
+  const Stats stats = RunAll("compactions", WithCompactions());
+  ExpectEverythingExercised(stats);
+  if (stats.cycles >= 100) {
+    EXPECT_GT(stats.compactions, stats.cycles / 2) << "compactions ran in many cycles";
+  }
+}
+
+TEST(CrashTortureTest, CrashesDuringBackgroundCompactions) {
+  TortureOptions options = WithCompactions();
+  options.synchronous_flush = false;
+  const Stats stats = RunAll("background compactions", options);
+  ExpectEverythingExercised(stats);
+  if (stats.cycles >= 100) {
+    EXPECT_GT(stats.compactions, 0U);
   }
 }
 

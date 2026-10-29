@@ -5,6 +5,7 @@ include(GoogleTest)
 # system (TODO 2.4) and environment-variable overrides. Not part of the engine.
 add_library(forgedb_test_support STATIC
   support/fault_injection_file_system.cpp
+  support/gated_file_system.cpp
   support/test_env.cpp
 )
 target_link_libraries(forgedb_test_support PUBLIC forgedb::forgedb)
@@ -22,6 +23,7 @@ add_executable(forgedb_unit_tests
   unit/coding_test.cpp
   unit/crc32c_test.cpp
   unit/db_background_test.cpp
+  unit/db_compaction_test.cpp
   unit/db_flush_test.cpp
   unit/db_recovery_test.cpp
   unit/db_snapshot_test.cpp

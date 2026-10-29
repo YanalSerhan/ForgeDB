@@ -3,10 +3,11 @@
 // answers wrongly and never crashes.
 //
 // Each trial builds a database on MemFileSystem (random writes and deletes,
-// small memtables so there are many flushes, a clean reopen in the middle,
-// random table settings) and closes it cleanly. Then it damages one file of
-// the type under test: bit flips, a run of random bytes, a run of zeros, or
-// a truncation. Then it reopens the database. The rule:
+// small memtables and levels so there are many flushes and compactions, a
+// clean reopen in the middle, random table settings) and closes it cleanly.
+// Then it damages one file of the type under test: bit flips, a run of
+// random bytes, a run of zeros, or a truncation. Then it reopens the
+// database. The rule:
 //
 //   - The open either fails with Corruption, or succeeds with the state after
 //     the first S writes, for some S. S may be less than all of them only if
@@ -107,6 +108,10 @@ Options RandomOptions(Rng& rng) {
   options.block_size = kBlockSizes.at(Uniform(rng, 0, 2));
   options.filter_bits_per_key = Uniform(rng, 0, 3) == 0 ? 0 : 10;
   options.block_cache_bytes = Uniform(rng, 0, 1) == 0 ? 0 : std::size_t{64} << 10U;
+  // Small levels, so tables are spread over several levels (Phase 4.3).
+  options.level0_compaction_trigger = static_cast<int>(Uniform(rng, 2, 4));
+  options.max_bytes_for_level_base = Uniform(rng, 16, 64) << 10U;
+  options.target_file_size = Uniform(rng, 4, 16) << 10U;
   return options;
 }
 

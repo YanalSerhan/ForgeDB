@@ -2,7 +2,8 @@
 //
 // Each struct starts empty and gains fields only when the engine can honour
 // them, so nothing here is a setting that silently does nothing:
-//   Options:       buffer sizes, caches, table settings (Phase 3)
+//   Options:       buffer sizes, caches, table settings (Phase 3), compaction
+//                  thresholds (Phase 4.3)
 //   ReadOptions:   `snapshot`, read as of an earlier point in time (Phase 4.1)
 #pragma once
 
@@ -36,6 +37,27 @@ struct Options {
 
   // Target size of the data blocks in new tables, in bytes. 256 B to 1 MiB.
   std::size_t block_size = 4096;
+
+  // --- Compaction (Phase 4.3; docs/adr/0008) ---
+
+  // Level 0 is compacted into level 1 once it holds this many tables.
+  int level0_compaction_trigger = 4;
+  // From this many level-0 tables, each write is delayed by 1 ms, so
+  // compaction can catch up.
+  int level0_slowdown_writes_trigger = 8;
+  // From this many, writes wait until a compaction has made room.
+  // 1 <= compaction trigger <= slowdown trigger <= stop trigger.
+  int level0_stop_writes_trigger = 12;
+
+  // Level 1 is compacted into level 2 once it holds more than this many
+  // bytes; each deeper level may hold 10 times more than the one above.
+  // At least 1.
+  std::size_t max_bytes_for_level_base = std::size_t{10} << 20;
+
+  // Compaction writes tables of about this size (a table is cut only between
+  // two different keys, so all versions of a key stay in one table). At
+  // least 1.
+  std::size_t target_file_size = std::size_t{2} << 20;
 };
 
 // Per-write settings.

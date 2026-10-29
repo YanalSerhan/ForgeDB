@@ -9,9 +9,8 @@ memtables are flushed to immutable, sorted table files with bloom filters, and a
 which files are live, so the database recovers to a consistent state after a crash. The core
 library has no third-party dependencies.
 
-**Status: Phase 4 in progress: snapshots and background flushes are done; compaction is next.**
-Nothing compacts level-0 tables yet, so reads slow down as tables accumulate. Not for production
-use.
+**Status: Phase 4 in progress: snapshots, background flushes and leveled compaction are done;
+statistics and the long stress test are next.** Not for production use.
 See [TODO.md](TODO.md) for the plan.
 
 ```cpp
@@ -40,14 +39,18 @@ flowchart LR
   end
   MEM -- "full: memtable_bytes" --> IMM["immutable memtable"]
   IMM -- "flush<br/>(background thread)" --> SST["level-0 tables<br/>NNNNNN.sst<br/>(blocks + bloom filter + index,<br/>CRC per block)"]
-  SST -- "recorded in<br/>(synced edit)" --> MAN["MANIFEST-NNNNNN<br/>(log of version edits)"]
+  SST -- "compaction<br/>(background thread)" --> LVL["levels 1-6<br/>sorted, non-overlapping tables,<br/>10x larger per level"]
+  SST -- "recorded in<br/>(synced edits)" --> MAN["MANIFEST-NNNNNN<br/>(log of version edits)"]
+  LVL --> MAN
   CUR["CURRENT<br/>(a hint, ADR 0007)"] -.-> MAN
   subgraph Reads
     R["Get / iterator<br/>(now or at a snapshot)"] --> MEM
     R --> IMM
     R --> SST
+    R --> LVL
   end
   SST <--> BC["block cache<br/>(sharded LRU)"]
+  LVL <--> BC
 ```
 
 - **Write path.** A write waits in a queue; the writer at the front leads a group, appends it to
@@ -58,8 +61,15 @@ flowchart LR
   syncs a version edit in the MANIFEST. A writer waits only if the memtable fills again before
   that flush is done. The old log is deleted after the *next* MANIFEST record, so damage to the
   last record never loses data (ADR 0007).
+- **Compaction.** When level 0 holds 4 tables, or a deeper level outgrows its target (10 MiB for
+  level 1, ten times more per level), the background thread merges it into the next level,
+  dropping versions no reader, not even the oldest snapshot, can see, and deletions with nothing
+  older below them. Output tables are cut only between keys. Writes slow down at 8 level-0
+  tables and wait at 12. Input tables are deleted once no read uses them and another MANIFEST
+  record has followed the compaction's (ADR 0008).
 - **Reads.** A `Get` looks in the memtable, the immutable memtable, then the level-0 tables
-  newest first (each skipped by its bloom filter when it cannot hold the key). An iterator merges
+  newest first, then the one table of each deeper level whose range holds the key (each skipped
+  by its bloom filter when it cannot hold the key). An iterator merges
   all of them and hides older versions and deletions. A read holds the DB's mutex only to take
   its view (memtables, table list, sequence number), never during I/O. A read at a snapshot uses
   the snapshot's sequence number instead of the latest; the table list it takes stays alive
@@ -92,7 +102,7 @@ they are recorded in [TODO.md](TODO.md) with how they were measured.
   answer or a `Corruption` status, never a wrong one.
 - **Checked against a model.** 3 seeds × 1,000,000 random operations, with reopens and about 80
   flushes per seed, agree with `std::map`; snapshot reads agree with copies of the map taken with
-  each snapshot.
+  each snapshot; a third run compacts through tiny levels so data reaches level 3.
 - **Tools.** `forgedb_sst_dump` prints and checks a table file; `forgedb_cli` runs `put`, `get`,
   `delete`, `scan` and `stats` (tables per level, and what recovery found) from the command line.
 
@@ -211,8 +221,6 @@ become a level-0 table. Output is UTF-8; `scan` escapes bytes that are not print
   tests and assertions (and, during development, ThreadSanitizer runs of the portable code on
   Linux).
 - Snapshots are not saved: they end when the DB is closed.
-- Until compaction (Phase 4), every flush and every open with unflushed writes adds a level-0
-  table, and reads consider every level-0 table.
 - Damage to the newest log drops the writes after it instead of failing the open (point-in-time
   recovery, reported in `RecoveryInfo` and by `forgedb_cli stats`; ADR 0004 rule 6). A newest log
   truncated exactly at a record boundary cannot be told from one whose last writes never reached

@@ -50,7 +50,9 @@ Byte layouts: `docs/file-formats.md`, "Version edit" and "MANIFEST and CURRENT".
    one extra log of at most `memtable_bytes` on disk. At open, after the new MANIFEST and CURRENT,
    the open deletes older logs and MANIFESTs, unlisted tables (a flush that crashed before its
    edit, or one whose edit was ignored) and `CURRENT.tmp`; the new MANIFEST's only record is its
-   snapshot, and damage to that fails the open (rule 4), so no log needs keeping.
+   snapshot, and damage to that fails the open (rule 4), so no log needs keeping. The same holds
+   for tables a compaction removes (Phase 4.3, ADR 0008): they are deleted only after another
+   record follows the compaction's edit.
 6. **Recovery checks every listed table** exists with the recorded size before opening.
 7. **The next file number** is above every file number in the directory, so a leftover file is
    never overwritten by a new one with its number.

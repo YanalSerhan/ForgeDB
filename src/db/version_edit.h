@@ -18,7 +18,7 @@
 
 namespace forgedb {
 
-// Levels of the LSM tree. Only level 0 is used until compaction (Phase 4).
+// Levels of the LSM tree: 0 (flushed memtables) to 6 (ADR 0008).
 inline constexpr int kNumLevels = 7;
 
 // A table file as the MANIFEST describes it.

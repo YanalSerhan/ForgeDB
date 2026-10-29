@@ -20,13 +20,14 @@
 //   - LogAndApply() appends an edit to the MANIFEST and syncs it, then makes
 //     the result current. A file an edit adds must already be synced.
 //
-// Not thread-safe: the DB calls it from one thread at a time (the opening
-// thread, then the background thread, with the write leader taking a file
-// number for a new log only while no flush is running) and publishes
-// Current() to readers under its own mutex.
+// Not thread-safe, except NewFileNumber(): the DB calls it from one thread at
+// a time (the opening thread, then the background thread) and publishes
+// Current() to readers under its own mutex; the write leader also takes file
+// numbers for new logs.
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -47,7 +48,8 @@ namespace forgedb {
 
 struct Version {
   // Level 0: newest file (highest number) first; files there may overlap.
-  // Deeper levels (Phase 4): sorted by smallest key, never overlapping.
+  // Deeper levels: sorted by smallest key, never overlapping, and no user key
+  // in two tables (ADR 0008).
   std::array<std::vector<FileMetaData>, kNumLevels> files;
 
   [[nodiscard]] std::size_t NumFiles() const noexcept;
@@ -88,8 +90,10 @@ class VersionSet {
   // stick); the DB then refuses writes.
   [[nodiscard]] Status LogAndApply(VersionEdit edit);
 
-  // A new file number (logs, tables and MANIFESTs share one counter).
-  [[nodiscard]] std::uint64_t NewFileNumber() noexcept { return next_file_number_++; }
+  // A new file number (logs, tables and MANIFESTs share one counter). The
+  // one member that two threads use at once: the write leader takes numbers
+  // for new logs while a compaction takes them for tables.
+  [[nodiscard]] std::uint64_t NewFileNumber() noexcept { return next_file_number_.fetch_add(1); }
 
   [[nodiscard]] std::shared_ptr<const Version> Current() const { return current_; }
   [[nodiscard]] std::uint64_t LogNumber() const noexcept { return log_number_; }
@@ -123,7 +127,7 @@ class VersionSet {
   std::shared_ptr<const Version> current_;
   std::vector<std::weak_ptr<const Version>> installed_;  // every version made current
   std::uint64_t log_number_ = 0;
-  std::uint64_t next_file_number_ = 1;
+  std::atomic<std::uint64_t> next_file_number_{1};
   SequenceNumber last_sequence_ = 0;
   std::uint64_t manifest_number_ = 0;
   std::unique_ptr<WritableFile> manifest_file_;

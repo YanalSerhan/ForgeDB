@@ -298,18 +298,21 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 ### 4.2 Background work
 - [x] One background thread (`std::thread` + condition variable) for flushes and compactions; flush has priority (flushes now; compactions join it in 4.3. The write leader still syncs the old log and starts the new one, then hands the memtable over and goes on; only the background thread uses the `VersionSet` after the open)
 - [x] Clean shutdown: stop scheduling, finish or abandon the current job safely, join the thread (a running flush is finished, a queued one is left to the logs; `BackgroundTest.ShutdownFinishesTheRunningFlush`)
-- [~] Write stalls: slow writes when L0 has too many files, stop writes above a hard limit, resume after compaction (document thresholds). Done: a writer waits when the memtable is full while the previous flush still runs (counted in `DBImpl::GetStalls()`), and a flush error wakes it with the error. *Moved to 4.3 (approved):* the level-0 slowdown (8 files) and stop (12) limits, as `Options` fields, because without compaction a stop limit would block writes for good
+- [x] Write stalls: slow writes when L0 has too many files, stop writes above a hard limit, resume after compaction (document thresholds). In 4.2: a writer waits when the memtable is full while the previous flush still runs, and a flush error wakes it with the error. In 4.3 (moved there, approved, since without compaction a stop limit would block writes for good): `Options::level0_slowdown_writes_trigger` (8: each write sleeps 1 ms once) and `level0_stop_writes_trigger` (12: a write needing a new memtable waits for a compaction); ADR 0008; all three counted in `DBImpl::GetStalls()`; `CompactionTest.WritesSlowDownThenStopWhileLevelZeroIsFull`
 - Test hook (approved): `DBImpl::SetSynchronousFlushForTesting` makes a write that switches memtables wait for its flush, so the step-by-step crash tests (`FlushCrashTest`), the deterministic crash torture variants and the corruption suite replay exactly; the new `CrashTortureTest.CrashesDuringBackgroundFlushes`, the model and stress tests run asynchronous. `FaultInjectionFileSystem::KillProcess()` makes a crash "with the DB open" safe with a second thread: kill, destroy the DB, then crash
 
 ### 4.3 Leveled compaction
-- [ ] Triggers: L0 file count (e.g., 4); level byte targets growing 10× per level
-- [ ] Score each level; compact the highest score above 1.0
-- [ ] Input selection: round-robin compaction pointer per level; expand inputs to every overlapping file in the next level
-- [ ] Output: new tables split by size; never split one user key's versions across outputs in a way that breaks ordering
-- [ ] Drop rules:
-  - [ ] A value shadowed by a newer value is dropped only if no live snapshot can see it
-  - [ ] A deletion marker is dropped only at the bottommost level for that key range, and only if no snapshot needs it
-- [ ] Install outputs with one `VersionEdit`; delete input files once no version references them
+*Design approved; ADR 0008. Code: `src/db/compaction.*` (choosing), `DBImpl::RunCompaction` (merging), `src/db/level_iterator.*` (reads).*
+- [x] Triggers: L0 file count (e.g., 4); level byte targets growing 10× per level (`Options::level0_compaction_trigger` 4, `max_bytes_for_level_base` 10 MiB, `target_file_size` 2 MiB; levels 1 to 5, level 6 last)
+- [x] Score each level; compact the highest score above 1.0 (one compaction at a time on the background thread; flushes first, also in the middle of a long compaction)
+- [x] Input selection: round-robin compaction pointer per level; expand inputs to every overlapping file in the next level (approved: from level 0, every table; the pointers live in memory only; a lone table with nothing below moves down without a rewrite)
+- [x] Output: new tables split by size; never split one user key's versions across outputs in a way that breaks ordering (approved: tables are cut only between user keys, so in levels 1+ no key spans two tables)
+- [x] Drop rules (S = the oldest live snapshot, or the latest sequence number without one, taken when the compaction starts):
+  - [x] A value shadowed by a newer value is dropped only if no live snapshot can see it (when the newer entry of the key is at or below S)
+  - [x] A deletion marker is dropped only at the bottommost level for that key range, and only if no snapshot needs it (at or below S, and no level below the output holds the key)
+- [x] Install outputs with one `VersionEdit`; delete input files once no version references them (`VersionSet::LiveFiles`; approved: and once another MANIFEST record follows the edit that removed them, ADR 0007 rule 5 extended. Shown by `CompactionTest.ADamagedLastCompactionRecordLosesNothing`; the corruption suite's MANIFEST trials now open intact more often, 13 of 100 against 5)
+- Reads: `Get` binary-searches each level below 0 for the one table that can hold the key; iterators read each deeper level through a level iterator that opens one table at a time
+- Test hooks: `FlushForTesting`, `CompactLevelForTesting`, `CompactAllForTesting`, `SetCompactionsPausedForTesting`; the synchronous-flush hook also waits for the compactions a flush triggers, and for every file deletion of the job
 
 ### 4.4 Statistics
 - [ ] Write amplification = bytes written by flushes and compactions ÷ bytes written by users
@@ -317,14 +320,14 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - [ ] Exposed through `DB::GetStats()` and `forgedb_cli stats`
 
 ### 4.5 Tests
-- [ ] Model test with snapshots: random snapshot creation and reads at old snapshots, compared to saved copies of the model
-- [ ] Compaction correctness: after forced full compaction, contents equal the model and dropped data is really gone
-- [ ] Crash torture with compaction running, including crashes mid-compaction and mid-MANIFEST-switch
+- [x] Model test with snapshots: random snapshot creation and reads at old snapshots, compared to saved copies of the model (done in 4.1; with compactions in `AgreesWithStdMapAcrossCompactions`: tiny levels, data in levels 1 to 3, about 200 snapshots per run)
+- [x] Compaction correctness: after forced full compaction, contents equal the model and dropped data is really gone (`CompactionTest.AFullCompactionLeavesExactlyTheModel` reads the raw tables: one entry per live key, no deletions; plus the drop-rule tests)
+- [x] Crash torture with compaction running, including crashes mid-compaction and mid-MANIFEST-switch (`CrashTortureTest.CrashesDuringCompactions` and `...BackgroundCompactions`; every variant now compacts, since each reopen adds a level-0 table; `CompactionCrashTest` crashes at each of 1,019 file operations of 160 writes with 9 flushes and 9 compactions, twice each)
 - [ ] Stress test: 8 reader threads (Gets, scans, snapshot reads) + 1–4 writer threads + background compaction for 10 minutes; checked against the model; debug assertions on
-- [ ] Error injection during compaction: the DB stops writes with a sticky error, data stays readable, reopen recovers
+- [x] Error injection during compaction: the DB stops writes with a sticky error, data stays readable, reopen recovers (`CompactionErrorTest`; shutdown during a compaction: `CompactionShutdownTest`). Found by `CrashTortureTest.InjectedWriteErrors` under Wine, where an open's compaction ran at a different moment: a compaction whose MANIFEST sync failed deleted its outputs, but the edit was in the file and a crash kept it, so the next open found a listed table missing. Fixed: outputs are removed only if the edit was never written; `CompactionErrorTest.AFailedManifestSyncKeepsTheOutputs` reproduces it deterministically
 
 ### 4.6 Docs
-- [ ] ADR: compaction policy and thresholds
+- [x] ADR: compaction policy and thresholds (ADR 0008, written with 4.3)
 - [ ] ADR: concurrency model without TSan (single writer, immutable files, pinned versions)
 
 ### ✅ Exit gate — Phase 4
@@ -399,5 +402,4 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - [ ] Database paths are limited to MAX_PATH unless Windows long paths are enabled
 - [ ] Real damage (not a crash) in the newest log drops the writes after it instead of failing the open (point-in-time, reported in `RecoveryInfo`; ADR 0004 rule 6)
 - [ ] Snapshots are not saved: they end when the DB is closed
-- [ ] Until compaction (Phase 4), every flush and every open with unflushed writes adds a level-0 table, and reads consider every level-0 table
 - [ ] A newest log truncated exactly at a record boundary looks like a log whose last writes never reached the disk: those writes are lost without a report (found by the corruption suite, 3.9)

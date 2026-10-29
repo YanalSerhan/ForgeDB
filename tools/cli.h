@@ -14,8 +14,8 @@
 // found when this command opened the database.
 //
 // Every command opens the database, so it runs recovery: writes left in the
-// log become a level-0 table (until compaction, Phase 4, each such open adds
-// one).
+// log become a level-0 table, which compaction later merges into the deeper
+// levels.
 //
 // Exit code: 0 on success, 1 if get found no value, 2 for a usage error or a
 // database error (the message goes to the error stream).

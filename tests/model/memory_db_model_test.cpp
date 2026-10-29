@@ -23,6 +23,7 @@
 #include "forgedb/db.h"
 
 #include "db/db_impl.h"
+#include "db/version_set.h"
 #include "env/mem_file_system.h"
 #include "model/model_harness.h"
 #include "support/test_env.h"
@@ -77,6 +78,11 @@ TEST_P(MemoryDBModelTest, AgreesWithStdMapAcrossFlushes) {
   Options db_options;
   db_options.memtable_bytes = std::max(std::size_t{16} << 10, OperationsPerSeed() * 64 / 100);
   db_options.block_cache_bytes = std::size_t{64} << 10;  // small: misses and evictions too
+  // No compaction: every table stays in level 0 (AgreesWithStdMapAcrossCompactions
+  // below compacts).
+  db_options.level0_compaction_trigger = 1 << 30;
+  db_options.level0_slowdown_writes_trigger = 1 << 30;
+  db_options.level0_stop_writes_trigger = 1 << 30;
   const auto storage = std::make_shared<std::shared_ptr<MemFileSystem>>();
   const DbSetup setup(
       [storage, db_options] {
@@ -101,6 +107,55 @@ TEST_P(MemoryDBModelTest, AgreesWithStdMapAcrossFlushes) {
               static_cast<unsigned long long>(GetParam()), static_cast<long long>(tables));
   if (options.operations >= 10000) {
     EXPECT_GT(tables, 30);
+  }
+}
+
+// TODO 4.3/4.5: the same with compaction and tiny levels, so data moves
+// through four or more levels while snapshots hold old versions: the drop
+// rules, the level iterators and the one-table-per-level Get are all checked
+// against the model. About 250 flushes per run; level 1 holds one
+// memtable's worth, and tables are a quarter of a memtable.
+TEST_P(MemoryDBModelTest, AgreesWithStdMapAcrossCompactions) {
+  Options db_options;
+  db_options.memtable_bytes = std::max(std::size_t{8} << 10, OperationsPerSeed() * 64 / 250);
+  db_options.block_cache_bytes = std::size_t{64} << 10;
+  db_options.level0_compaction_trigger = 2;
+  db_options.max_bytes_for_level_base = db_options.memtable_bytes;
+  db_options.target_file_size = db_options.memtable_bytes / 4;
+  db_options.block_size = 1024;
+  const auto storage = std::make_shared<std::shared_ptr<MemFileSystem>>();
+  const DbSetup setup(
+      [storage, db_options] {
+        *storage = std::make_shared<MemFileSystem>();
+        return OpenDB(db_options, "model-test", *storage);
+      },
+      [storage, db_options] { return OpenDB(db_options, "model-test", *storage); });
+  RunOptions options;
+  options.seed = GetParam();
+  options.operations = OperationsPerSeed();
+  options.generator.expected_reopens = 5;
+  options.generator.snapshot_slots = 4;
+  options.generator.expected_snapshots = 200;
+  EXPECT_EQ(RunModelTest(setup, options), "");
+
+  // The data really went deep: open the storage once more and look.
+  const Result<std::unique_ptr<DB>> db = OpenDB(db_options, "model-test", *storage);
+  ASSERT_TRUE(db.ok()) << db.status().ToString();
+  auto& impl = dynamic_cast<DBImpl&>(**db);
+  impl.WaitForBackgroundWorkForTesting();
+  const std::shared_ptr<const Version> version = impl.CurrentVersion();
+  int deepest = 0;
+  std::string levels;
+  for (std::size_t level = 0; level < version->files.size(); ++level) {
+    levels += " " + std::to_string(version->files[level].size());
+    if (!version->files[level].empty()) {
+      deepest = static_cast<int>(level);
+    }
+  }
+  std::printf("[ model    ] seed %llu: tables per level:%s\n",  // NOLINT(*-vararg)
+              static_cast<unsigned long long>(GetParam()), levels.c_str());
+  if (options.operations >= 10000) {
+    EXPECT_GE(deepest, 3);
   }
 }
 
