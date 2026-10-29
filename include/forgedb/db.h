@@ -13,9 +13,11 @@
 //
 // Storage: every write is appended to a write-ahead log in the directory
 // `name` before it is applied to an in-memory table (the memtable). A full
-// memtable is written to an immutable, sorted table file, recorded in the
-// MANIFEST; opening the database replays the logs written since. Only one DB
-// object may have a database open at a time, in any process.
+// memtable is written to an immutable, sorted table file by a background
+// thread, and recorded in the MANIFEST; opening the database replays the logs
+// written since. Only one DB object may have a database open at a time, in
+// any process. Destroying the DB stops the background thread (a flush in
+// progress is finished first); writes not yet in a table are in the logs.
 #pragma once
 
 #include <cstddef>
@@ -27,6 +29,7 @@
 #include "forgedb/iterator.h"
 #include "forgedb/options.h"
 #include "forgedb/result.h"
+#include "forgedb/snapshot.h"
 #include "forgedb/status.h"
 #include "forgedb/write_batch.h"
 
@@ -68,12 +71,19 @@ class DB {
   // none. An empty batch is a no-op.
   [[nodiscard]] virtual Status Write(const WriteOptions& options, const WriteBatch& batch) = 0;
 
-  // The value of `key`, or a NotFound status if it has none.
+  // The value of `key` (as of options.snapshot, if set), or a NotFound status
+  // if it has none. InvalidArgument for a snapshot from another DB.
   [[nodiscard]] virtual Result<std::string> Get(const ReadOptions& options,
                                                 std::string_view key) = 0;
 
-  // A new iterator over the whole database, as of now (see forgedb/iterator.h).
+  // A new iterator over the whole database, as of now or as of
+  // options.snapshot (see forgedb/iterator.h). An invalid snapshot gives an
+  // iterator with no entries whose status() is InvalidArgument.
   [[nodiscard]] virtual std::unique_ptr<Iterator> NewIterator(const ReadOptions& options) = 0;
+
+  // The database as it is now, to read later with ReadOptions::snapshot (see
+  // forgedb/snapshot.h). Cheap: it records a sequence number.
+  [[nodiscard]] virtual std::shared_ptr<const Snapshot> GetSnapshot() = 0;
 };
 
 }  // namespace forgedb

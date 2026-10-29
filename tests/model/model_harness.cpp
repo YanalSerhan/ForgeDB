@@ -73,6 +73,15 @@ std::string Describe(const Op& op) {
       return "Seek(" + Quote(op.key) + ") + " + std::to_string(op.next_count) + " x Next()";
     case Op::Kind::kReopen:
       return "Reopen()";
+    case Op::Kind::kTakeSnapshot:
+      return "snapshot[" + std::to_string(op.slot) + "] = GetSnapshot()";
+    case Op::Kind::kReleaseSnapshot:
+      return "snapshot[" + std::to_string(op.slot) + "].reset()";
+    case Op::Kind::kGetAtSnapshot:
+      return "Get(" + Quote(op.key) + ") at snapshot[" + std::to_string(op.slot) + "]";
+    case Op::Kind::kSeekAtSnapshot:
+      return "Seek(" + Quote(op.key) + ") + " + std::to_string(op.next_count) +
+             " x Next() at snapshot[" + std::to_string(op.slot) + "]";
   }
   return "?";
 }
@@ -86,6 +95,9 @@ OpGenerator::OpGenerator(std::uint64_t seed, std::size_t total_operations, Gener
                              static_cast<double>(std::max<std::size_t>(total_operations, 1)))),
       reopen_probability_(
           std::min(0.01, static_cast<double>(options.expected_reopens) /
+                             static_cast<double>(std::max<std::size_t>(total_operations, 1)))),
+      snapshot_probability_(
+          std::min(0.01, static_cast<double>(options.expected_snapshots) /
                              static_cast<double>(std::max<std::size_t>(total_operations, 1)))),
       rng_(seed) {}
 
@@ -150,6 +162,12 @@ Op OpGenerator::Next() {
     op.kind = Op::Kind::kReopen;
     return op;
   }
+  const bool snapshots = options_.snapshot_slots > 0;
+  if (snapshots && snapshot_probability_ > 0 && Chance(2 * snapshot_probability_)) {
+    op.kind = Chance(0.5) ? Op::Kind::kTakeSnapshot : Op::Kind::kReleaseSnapshot;
+    op.slot = rng_() % options_.snapshot_slots;
+    return op;
+  }
   // Put 35%, Delete 15%, WriteBatch 10%, Get 30%, Seek 10%.
   const std::uint64_t roll = rng_() % 100;
   if (roll < 35) {
@@ -169,6 +187,10 @@ Op OpGenerator::Next() {
   } else if (roll < 90) {
     op.kind = Op::Kind::kGet;
     op.key = RandomKey();
+    if (snapshots && Chance(1.0 / 3)) {
+      op.kind = Op::Kind::kGetAtSnapshot;
+      op.slot = rng_() % options_.snapshot_slots;
+    }
   } else {
     op.kind = Op::Kind::kSeek;
     op.key = RandomKey();
@@ -176,6 +198,10 @@ Op OpGenerator::Next() {
       op.key.push_back('~');  // between stored keys
     }
     op.next_count = rng_() % (options_.max_next_count + 1);
+    if (snapshots && Chance(1.0 / 3)) {
+      op.kind = Op::Kind::kSeekAtSnapshot;
+      op.slot = rng_() % options_.snapshot_slots;
+    }
   }
   return op;
 }
@@ -227,6 +253,63 @@ std::optional<std::string> CheckWrite(const Status& status, const Op& op) {
   return std::nullopt;
 }
 
+// "NotFound", the quoted value, or the error, for comparing a Get.
+std::string GetResultText(const Result<std::string>& got) {
+  if (got.ok()) {
+    return Quote(*got);
+  }
+  if (got.status().code() == Status::Code::kNotFound) {
+    return "NotFound";
+  }
+  return "error " + got.status().ToString();
+}
+
+std::optional<std::string> ApplySnapshotOp(DB& db, const Model& model, Snapshots& snapshots,
+                                           const Op& op) {
+  if (snapshots.size() <= op.slot) {
+    snapshots.resize(op.slot + 1);
+  }
+  std::optional<SavedSnapshot>& slot = snapshots[op.slot];
+  switch (op.kind) {
+    case Op::Kind::kTakeSnapshot:
+      slot = SavedSnapshot{.snapshot = db.GetSnapshot(), .model = model};
+      return std::nullopt;
+    case Op::Kind::kReleaseSnapshot:
+      slot.reset();
+      return std::nullopt;
+    case Op::Kind::kGetAtSnapshot: {
+      if (!slot) {
+        return std::nullopt;  // nothing to read at
+      }
+      const auto expected = slot->model.find(op.key);
+      const std::string want = expected == slot->model.end() ? "NotFound" : Quote(expected->second);
+      const std::string have = GetResultText(db.Get({.snapshot = slot->snapshot}, op.key));
+      if (have != want) {
+        return Describe(op) + ": expected " + want + ", got " + have;
+      }
+      return std::nullopt;
+    }
+    case Op::Kind::kSeekAtSnapshot: {
+      if (!slot) {
+        return std::nullopt;
+      }
+      const std::unique_ptr<Iterator> it = db.NewIterator({.snapshot = slot->snapshot});
+      it->Seek(op.key);
+      return CompareRange(*it, slot->model.lower_bound(op.key), slot->model.cend(),
+                          op.next_count + 1, Describe(op));
+    }
+    case Op::Kind::kPut:
+    case Op::Kind::kDelete:
+    case Op::Kind::kWriteBatch:
+    case Op::Kind::kGet:
+    case Op::Kind::kScan:
+    case Op::Kind::kSeek:
+    case Op::Kind::kReopen:
+      break;
+  }
+  return "not a snapshot operation";
+}
+
 void ApplyToModel(Model& model, const Mutation& mutation) {
   if (mutation.kind == Mutation::Kind::kPut) {
     model[mutation.key] = mutation.value;
@@ -238,7 +321,7 @@ void ApplyToModel(Model& model, const Mutation& mutation) {
 }  // namespace
 
 std::optional<std::string> Apply(std::unique_ptr<DB>& db_ref, const DbSetup& setup, Model& model,
-                                 const Op& op) {
+                                 Snapshots& snapshots, const Op& op) {
   if (op.kind == Op::Kind::kReopen) {
     if (!setup.reopen) {
       return std::string("Reopen() but the DbSetup has no reopen function");
@@ -249,7 +332,13 @@ std::optional<std::string> Apply(std::unique_ptr<DB>& db_ref, const DbSetup& set
       return "Reopen() failed: " + reopened.status().ToString();
     }
     db_ref = std::move(reopened).value();
+    // Snapshots end with their DB; these outlived it until now.
+    snapshots.clear();
     return std::nullopt;  // whether recovery kept everything shows in later reads
+  }
+  if (op.kind == Op::Kind::kTakeSnapshot || op.kind == Op::Kind::kReleaseSnapshot ||
+      op.kind == Op::Kind::kGetAtSnapshot || op.kind == Op::Kind::kSeekAtSnapshot) {
+    return ApplySnapshotOp(*db_ref, model, snapshots, op);
   }
   DB& db = *db_ref;
   switch (op.kind) {
@@ -276,17 +365,9 @@ std::optional<std::string> Apply(std::unique_ptr<DB>& db_ref, const DbSetup& set
       return CheckWrite(db.Write(WriteOptions{}, batch), op);
     }
     case Op::Kind::kGet: {
-      const Result<std::string> got = db.Get(ReadOptions{}, op.key);
       const auto expected = model.find(op.key);
       const std::string want = expected == model.end() ? "NotFound" : Quote(expected->second);
-      std::string have;
-      if (got.ok()) {
-        have = Quote(*got);
-      } else if (got.status().code() == Status::Code::kNotFound) {
-        have = "NotFound";
-      } else {
-        have = "error " + got.status().ToString();
-      }
+      const std::string have = GetResultText(db.Get(ReadOptions{}, op.key));
       if (have != want) {
         return Describe(op) + ": expected " + want + ", got " + have;
       }
@@ -304,6 +385,10 @@ std::optional<std::string> Apply(std::unique_ptr<DB>& db_ref, const DbSetup& set
                           Describe(op));
     }
     case Op::Kind::kReopen:
+    case Op::Kind::kTakeSnapshot:
+    case Op::Kind::kReleaseSnapshot:
+    case Op::Kind::kGetAtSnapshot:
+    case Op::Kind::kSeekAtSnapshot:
       break;  // handled above
   }
   return "unknown operation kind";
@@ -317,8 +402,9 @@ std::optional<Failure> Replay(const DbSetup& setup, std::span<const Op> ops) {
   }
   std::unique_ptr<DB> db = std::move(opened).value();
   Model model;
+  Snapshots snapshots;
   for (std::size_t i = 0; i < ops.size(); ++i) {
-    if (std::optional<std::string> problem = Apply(db, setup, model, ops[i])) {
+    if (std::optional<std::string> problem = Apply(db, setup, model, snapshots, ops[i])) {
       return Failure{.op_index = i, .message = std::move(*problem)};
     }
   }
@@ -454,8 +540,10 @@ std::string RunModelTest(const DbSetup& setup, const RunOptions& options) {
     std::unique_ptr<DB> db = std::move(opened).value();
     OpGenerator generator(options.seed, options.operations, options.generator);
     Model model;
+    Snapshots snapshots;
     for (std::size_t i = 0; i < options.operations && !failure; ++i) {
-      if (std::optional<std::string> problem = Apply(db, setup, model, generator.Next())) {
+      if (std::optional<std::string> problem =
+              Apply(db, setup, model, snapshots, generator.Next())) {
         failure = Failure{.op_index = i, .message = std::move(*problem)};
       }
     }

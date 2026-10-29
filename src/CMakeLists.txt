@@ -13,6 +13,7 @@ add_library(forgedb STATIC
   db/db_iter.cpp
   db/filename.cpp
   db/internal_key.cpp
+  db/snapshot.cpp
   db/table_cache.cpp
   db/version_edit.cpp
   db/version_set.cpp

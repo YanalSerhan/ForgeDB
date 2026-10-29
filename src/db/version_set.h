@@ -21,8 +21,9 @@
 //     the result current. A file an edit adds must already be synced.
 //
 // Not thread-safe: the DB calls it from one thread at a time (the opening
-// thread, then the write leader that flushes) and publishes Current() to
-// readers under its own mutex.
+// thread, then the background thread, with the write leader taking a file
+// number for a new log only while no flush is running) and publishes
+// Current() to readers under its own mutex.
 #pragma once
 
 #include <array>
@@ -95,6 +96,14 @@ class VersionSet {
   [[nodiscard]] SequenceNumber LastSequence() const noexcept { return last_sequence_; }
   [[nodiscard]] std::uint64_t ManifestNumber() const noexcept { return manifest_number_; }
 
+  // The numbers of the table files that the current version lists or that an
+  // older version still in use lists (a read holds it), sorted. A table not
+  // in this list can be deleted: no read can open it any more. Versions are
+  // released by whichever thread drops the last reference; the VersionSet
+  // keeps a weak_ptr to each one it installed and forgets the expired ones
+  // here.
+  [[nodiscard]] std::vector<std::uint64_t> LiveFiles();
+
  private:
   // Replays MANIFEST `number`. Returns false (no error) if its first record is
   // incomplete, so the caller tries an older one.
@@ -106,10 +115,13 @@ class VersionSet {
   void AdoptScalars(const VersionEdit& edit) noexcept;
   // A snapshot edit: the scalars and every file of `version`.
   [[nodiscard]] VersionEdit Snapshot(const Version& version) const;
+  // Makes `version` current and remembers it for LiveFiles().
+  void Install(std::shared_ptr<const Version> version);
 
   FileSystem* fs_;
   std::filesystem::path db_dir_;
   std::shared_ptr<const Version> current_;
+  std::vector<std::weak_ptr<const Version>> installed_;  // every version made current
   std::uint64_t log_number_ = 0;
   std::uint64_t next_file_number_ = 1;
   SequenceNumber last_sequence_ = 0;

@@ -9,8 +9,9 @@ memtables are flushed to immutable, sorted table files with bloom filters, and a
 which files are live, so the database recovers to a consistent state after a crash. The core
 library has no third-party dependencies.
 
-**Status: Phase 3 done (table files, flush, MANIFEST, tools, corruption tests).** Nothing compacts
-level-0 tables yet (Phase 4), so reads slow down as tables accumulate. Not for production use.
+**Status: Phase 4 in progress: snapshots and background flushes are done; compaction is next.**
+Nothing compacts level-0 tables yet, so reads slow down as tables accumulate. Not for production
+use.
 See [TODO.md](TODO.md) for the plan.
 
 ```cpp
@@ -22,6 +23,10 @@ FORGEDB_RETURN_IF_ERROR(db->Put({.sync = true}, "key", "value"));  // durable wh
 forgedb::Result<std::string> value = db->Get({}, "key");
 std::unique_ptr<forgedb::Iterator> it = db->NewIterator({});
 for (it->Seek("k"); it->Valid(); it->Next()) { /* it->key(), it->value() */ }
+
+std::shared_ptr<const forgedb::Snapshot> snapshot = db->GetSnapshot();
+FORGEDB_RETURN_IF_ERROR(db->Put({}, "key", "newer"));
+value = db->Get({.snapshot = snapshot}, "key");  // still "value"
 ```
 
 ## Architecture
@@ -34,11 +39,11 @@ flowchart LR
     GC --> MEM["memtable<br/>(skip list, lock-free reads)"]
   end
   MEM -- "full: memtable_bytes" --> IMM["immutable memtable"]
-  IMM -- "flush" --> SST["level-0 tables<br/>NNNNNN.sst<br/>(blocks + bloom filter + index,<br/>CRC per block)"]
+  IMM -- "flush<br/>(background thread)" --> SST["level-0 tables<br/>NNNNNN.sst<br/>(blocks + bloom filter + index,<br/>CRC per block)"]
   SST -- "recorded in<br/>(synced edit)" --> MAN["MANIFEST-NNNNNN<br/>(log of version edits)"]
   CUR["CURRENT<br/>(a hint, ADR 0007)"] -.-> MAN
   subgraph Reads
-    R["Get / iterator"] --> MEM
+    R["Get / iterator<br/>(now or at a snapshot)"] --> MEM
     R --> IMM
     R --> SST
   end
@@ -48,14 +53,17 @@ flowchart LR
 - **Write path.** A write waits in a queue; the writer at the front leads a group, appends it to
   the log as one record (one sync if any member asked for one) and applies it to the memtable.
   Readers see a group all at once, at its last sequence number.
-- **Flush.** A full memtable becomes immutable; the leader syncs the old log, starts a new one,
-  writes the table, syncs it, then appends and syncs a version edit in the MANIFEST. The old log
-  is deleted after the *next* MANIFEST record, so damage to the last record never loses data
-  (ADR 0007).
+- **Flush.** A full memtable becomes immutable; the write leader syncs the old log, starts a new
+  one and goes on writing. A background thread writes the table, syncs it, then appends and
+  syncs a version edit in the MANIFEST. A writer waits only if the memtable fills again before
+  that flush is done. The old log is deleted after the *next* MANIFEST record, so damage to the
+  last record never loses data (ADR 0007).
 - **Reads.** A `Get` looks in the memtable, the immutable memtable, then the level-0 tables
   newest first (each skipped by its bloom filter when it cannot hold the key). An iterator merges
   all of them and hides older versions and deletions. A read holds the DB's mutex only to take
-  its view (memtables, table list, sequence number), never during I/O.
+  its view (memtables, table list, sequence number), never during I/O. A read at a snapshot uses
+  the snapshot's sequence number instead of the latest; the table list it takes stays alive
+  (and its files on disk) for as long as the read needs it.
 - **Recovery.** The newest MANIFEST with a complete snapshot wins (CURRENT is only a hint,
   because Windows does not document that a rename survives a power loss). The logs written since
   the last flush are replayed; the newest may end at a torn write, which is dropped and reported.
@@ -83,7 +91,8 @@ they are recorded in [TODO.md](TODO.md) with how they were measured.
   corruption suite (below) damages tables, logs and MANIFESTs at random: reads give the right
   answer or a `Corruption` status, never a wrong one.
 - **Checked against a model.** 3 seeds × 1,000,000 random operations, with reopens and about 80
-  flushes per seed, agree with `std::map`.
+  flushes per seed, agree with `std::map`; snapshot reads agree with copies of the map taken with
+  each snapshot.
 - **Tools.** `forgedb_sst_dump` prints and checks a table file; `forgedb_cli` runs `put`, `get`,
   `delete`, `scan` and `stats` (tables per level, and what recovery found) from the command line.
 
@@ -201,6 +210,7 @@ become a level-0 table. Output is UTF-8; `scan` escapes bytes that are not print
   0002). There is no data-race detector on Windows; concurrency is verified by design, stress
   tests and assertions (and, during development, ThreadSanitizer runs of the portable code on
   Linux).
+- Snapshots are not saved: they end when the DB is closed.
 - Until compaction (Phase 4), every flush and every open with unflushed writes adds a level-0
   table, and reads consider every level-0 table.
 - Damage to the newest log drops the writes after it instead of failing the open (point-in-time

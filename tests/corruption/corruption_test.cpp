@@ -116,13 +116,17 @@ void BuildDatabase(Rng& rng, const std::shared_ptr<FileSystem>& fs, const Option
                    std::vector<Write>& history) {
   const std::uint64_t writes = Uniform(rng, 200, 1000);
   const std::uint64_t reopen_at = Uniform(rng, 0, writes);
+  // Flushes are made synchronous (a DBImpl test hook), so a seed builds the
+  // same files every time.
   Result<std::unique_ptr<DB>> db = OpenDB(options, kDb, fs);
   ASSERT_TRUE(db.ok()) << db.status().ToString();
+  dynamic_cast<DBImpl&>(**db).SetSynchronousFlushForTesting(true);
   for (std::uint64_t i = 0; i < writes; ++i) {
     if (i == reopen_at) {
       db = Status::Internal("closed");
       db = OpenDB(options, kDb, fs);
       ASSERT_TRUE(db.ok()) << db.status().ToString();
+      dynamic_cast<DBImpl&>(**db).SetSynchronousFlushForTesting(true);
     }
     Write write{.key = Key(Uniform(rng, 0, kKeySpace - 1)), .value = std::nullopt};
     if (Uniform(rng, 0, 4) != 0) {

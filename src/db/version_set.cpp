@@ -70,7 +70,9 @@ std::size_t Version::NumFiles() const noexcept {
 }
 
 VersionSet::VersionSet(FileSystem* fs, std::filesystem::path db_dir)
-    : fs_(fs), db_dir_(std::move(db_dir)), current_(std::make_shared<const Version>()) {}
+    : fs_(fs), db_dir_(std::move(db_dir)) {
+  Install(std::make_shared<const Version>());
+}
 
 VersionSet::~VersionSet() {
   if (manifest_file_ != nullptr) {
@@ -187,7 +189,7 @@ Result<bool> VersionSet::ReadManifest(std::uint64_t number, ManifestRecoveryInfo
     ++info.edits_applied;
   }
   info.torn_tail = reader.IgnoredTail();
-  current_ = std::move(version);
+  Install(std::move(version));
   manifest_number_ = number;
   return true;
 }
@@ -295,7 +297,7 @@ Status VersionSet::StartNewManifest(const VersionEdit& edit) {
   manifest_file_ = std::move(file);
   manifest_log_.emplace(writer);  // points at the file, which moved without changing address
   manifest_number_ = number;
-  current_ = std::move(version);
+  Install(std::move(version));
   return Status::OK();
 }
 
@@ -317,8 +319,33 @@ Status VersionSet::LogAndApply(VersionEdit edit) {
   FORGEDB_RETURN_IF_ERROR(manifest_log_->AddRecord(record));
   FORGEDB_RETURN_IF_ERROR(manifest_file_->Sync());
   AdoptScalars(edit);
-  current_ = std::move(version);
+  Install(std::move(version));
   return Status::OK();
+}
+
+void VersionSet::Install(std::shared_ptr<const Version> version) {
+  installed_.emplace_back(version);
+  current_ = std::move(version);
+}
+
+std::vector<std::uint64_t> VersionSet::LiveFiles() {
+  std::vector<std::uint64_t> live;
+  std::erase_if(installed_, [&live](const std::weak_ptr<const Version>& weak) {
+    const std::shared_ptr<const Version> version = weak.lock();
+    if (version == nullptr) {
+      return true;  // released by every reader: forget it
+    }
+    for (const std::vector<FileMetaData>& level : version->files) {
+      for (const FileMetaData& file : level) {
+        live.push_back(file.number);
+      }
+    }
+    return false;
+  });
+  std::ranges::sort(live);
+  const auto duplicates = std::ranges::unique(live);
+  live.erase(duplicates.begin(), duplicates.end());
+  return live;
 }
 
 }  // namespace forgedb

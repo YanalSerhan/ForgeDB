@@ -176,6 +176,37 @@ TEST_F(VersionSetTest, ManifestsSpanningManyLogBlocks) {
   EXPECT_EQ(r.versions->LastSequence(), std::uint64_t{kEdits});
 }
 
+// A table removed by an edit stays live while a reader holds an older
+// version that lists it (TODO 4.1), and only then.
+TEST_F(VersionSetTest, LiveFilesIncludeTablesOfVersionsStillInUse) {
+  const Recovered r = Recover();
+  ASSERT_TRUE(r.status.ok());
+  VersionEdit snapshot;
+  snapshot.added_files.push_back({.level = 0, .file = MakeTable(10, 1, "a", "c")});
+  snapshot.added_files.push_back({.level = 0, .file = MakeTable(11, 1, "d", "f")});
+  ASSERT_TRUE(r.versions->StartNewManifest(snapshot).ok());
+  EXPECT_EQ(r.versions->LiveFiles(), (std::vector<std::uint64_t>{10, 11}));
+
+  std::shared_ptr<const Version> held = r.versions->Current();  // a reader's
+  VersionEdit replace;
+  replace.removed_files.push_back({.level = 0, .number = 10});
+  replace.added_files.push_back({.level = 0, .file = MakeTable(12, 1, "a", "c")});
+  ASSERT_TRUE(r.versions->LogAndApply(replace).ok());
+  EXPECT_EQ(r.versions->LiveFiles(), (std::vector<std::uint64_t>{10, 11, 12}))
+      << "table 10 is still in a version in use";
+
+  VersionEdit remove_more;
+  remove_more.removed_files.push_back({.level = 0, .number = 11});
+  ASSERT_TRUE(r.versions->LogAndApply(remove_more).ok());
+  std::shared_ptr<const Version> also_held = r.versions->Current();  // lists only 12
+  EXPECT_EQ(r.versions->LiveFiles(), (std::vector<std::uint64_t>{10, 11, 12}));
+
+  held.reset();
+  EXPECT_EQ(r.versions->LiveFiles(), (std::vector<std::uint64_t>{12}));
+  also_held.reset();
+  EXPECT_EQ(r.versions->LiveFiles(), (std::vector<std::uint64_t>{12})) << "the current version";
+}
+
 TEST_F(VersionSetTest, LevelZeroIsNewestFirst) {
   const Recovered r = Recover();
   ASSERT_TRUE(r.status.ok());

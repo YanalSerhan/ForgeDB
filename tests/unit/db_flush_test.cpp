@@ -118,6 +118,7 @@ TEST_F(FlushTest, FullMemtablesAreFlushedAndEverythingStaysReadable) {
   for (int i = 0; i < 1000; ++i) {
     ASSERT_TRUE(db->Put({}, Key(i), Value(i)).ok());
   }
+  Impl(*db).WaitForFlushForTesting();  // the last one runs in the background
   const std::uint64_t flushes = Impl(*db).FlushesForTesting();
   EXPECT_GE(flushes, 10U) << "1000 writes of ~220 bytes into 16 KiB memtables";
   EXPECT_EQ(Impl(*db).CurrentVersion()->files[0].size(), flushes);
@@ -184,6 +185,9 @@ TEST_F(FlushTest, ReopenAfterFlushes) {
     for (int i = 0; i < 500; ++i) {
       ASSERT_TRUE(db->Put({}, Key(i), Value(i)).ok());
     }
+    // Otherwise a flush still queued at the close is left to the logs, and
+    // the open replays two of them.
+    Impl(*db).WaitForFlushForTesting();
   }
   const std::unique_ptr<DB> db = Open();
   const RecoveryInfo& info = Impl(*db).GetRecoveryInfo();
@@ -365,6 +369,7 @@ struct FlushedDatabase {
 FlushedDatabase BuildFlushedDatabase(int writes_after) {
   FlushedDatabase built;
   const std::unique_ptr<DB> db = std::move(OpenDB(SmallMemtable(), "db", built.fs)).value();
+  Impl(*db).SetSynchronousFlushForTesting(true);  // a flush is done when its write returns
   built.manifest = DescriptorFileName("db", Impl(*db).GetRecoveryInfo().new_manifest_number);
   std::uint64_t flushes = 0;
   while (flushes < 3) {
@@ -425,7 +430,9 @@ TEST(ManifestDamageTest, DamageToTheLastRecordLosesNothing) {
 //
 // The crash torture test crashes at random points; these crash at every file
 // operation in turn, so every step of a flush and of an open (table, new log,
-// MANIFEST, CURRENT.tmp, the rename, the deletions) is hit. Each crash is
+// MANIFEST, CURRENT.tmp, the rename, the deletions) is hit. Flushes are made
+// synchronous (SetSynchronousFlushForTesting), so the background thread's
+// operations come in the same order in every run. Each crash is
 // followed by a power loss or a process crash; renames and removals may be
 // undone (the fault-injection defaults). The reopen must keep every
 // acknowledged synced write and nothing after the failed one.
@@ -465,6 +472,7 @@ TEST(FlushCrashTest, ACrashAtAnyStepOfAFlushLosesNoSyncedWrite) {
   {
     const auto fs = NewFaultFs(1);
     const std::unique_ptr<DB> db = std::move(OpenDB(SmallMemtable(), "db", fs)).value();
+    Impl(*db).SetSynchronousFlushForTesting(true);  // the same operations in every run
     const std::uint64_t base = fs->OperationCount();
     ASSERT_EQ(WriteSynced(*db, 0, kWrites), kWrites);
     ASSERT_GE(Impl(*db).FlushesForTesting(), 2U);
@@ -483,6 +491,7 @@ TEST(FlushCrashTest, ACrashAtAnyStepOfAFlushLosesNoSyncedWrite) {
       int acknowledged = 0;
       {
         const std::unique_ptr<DB> db = std::move(OpenDB(SmallMemtable(), "db", fs)).value();
+        Impl(*db).SetSynchronousFlushForTesting(true);
         fs->CrashAtOperation(step);
         acknowledged = WriteSynced(*db, 0, kWrites);
       }
@@ -503,6 +512,7 @@ constexpr int kOpenTestWrites = 100;
 std::shared_ptr<FaultInjectionFileSystem> DatabaseToReopen(std::uint64_t seed) {
   auto fs = NewFaultFs(seed);
   const std::unique_ptr<DB> db = std::move(OpenDB(SmallMemtable(), "db", fs)).value();
+  Impl(*db).SetSynchronousFlushForTesting(true);  // the same files to reopen every time
   EXPECT_EQ(WriteSynced(*db, 0, kOpenTestWrites), kOpenTestWrites);
   return fs;
 }

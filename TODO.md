@@ -290,15 +290,16 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 ## Phase 4 — Compaction and snapshots (≈2–3 weeks)
 
 ### 4.1 Versions and snapshots
-- [ ] Versions reference-counted; iterators and Gets pin the version they started with
-- [ ] `Snapshot` = a sequence number held by `std::shared_ptr<const Snapshot>`; a list tracks the oldest live snapshot
-- [ ] `ReadOptions::snapshot` honoured by Get and iterators
-- [ ] Test: an iterator on a snapshot sees a frozen view while writes, flushes and compactions continue
+- [x] Versions reference-counted; iterators and Gets pin the version they started with (`std::shared_ptr<const Version>` since 3.6; new: `VersionSet::LiveFiles()` keeps a `weak_ptr` to every installed version and lists the tables of those still in use, so compaction can delete a table only when no read can open it)
+- [x] `Snapshot` = a sequence number held by `std::shared_ptr<const Snapshot>`; a list tracks the oldest live snapshot (public `forgedb/snapshot.h`, `DB::GetSnapshot()`, released by dropping it; the list is shared by the DB and its snapshots, so a snapshot may outlive the DB; another DB's snapshot, or a homemade one, is `InvalidArgument`; snapshots end with the DB)
+- [x] `ReadOptions::snapshot` honoured by Get and iterators
+- [x] Test: an iterator on a snapshot sees a frozen view while writes, flushes and compactions continue (writes and flushes now: `SnapshotTest`; compactions with 4.3. Also brought forward from 4.5: the flush model test takes about 200 snapshots per run in 4 slots and reads at them against copies of the model; the harness catches and shrinks a planted snapshot bug to 3 operations)
 
 ### 4.2 Background work
-- [ ] One background thread (`std::thread` + condition variable) for flushes and compactions; flush has priority
-- [ ] Clean shutdown: stop scheduling, finish or abandon the current job safely, join the thread
-- [ ] Write stalls: slow writes when L0 has too many files, stop writes above a hard limit, resume after compaction (document thresholds)
+- [x] One background thread (`std::thread` + condition variable) for flushes and compactions; flush has priority (flushes now; compactions join it in 4.3. The write leader still syncs the old log and starts the new one, then hands the memtable over and goes on; only the background thread uses the `VersionSet` after the open)
+- [x] Clean shutdown: stop scheduling, finish or abandon the current job safely, join the thread (a running flush is finished, a queued one is left to the logs; `BackgroundTest.ShutdownFinishesTheRunningFlush`)
+- [~] Write stalls: slow writes when L0 has too many files, stop writes above a hard limit, resume after compaction (document thresholds). Done: a writer waits when the memtable is full while the previous flush still runs (counted in `DBImpl::GetStalls()`), and a flush error wakes it with the error. *Moved to 4.3 (approved):* the level-0 slowdown (8 files) and stop (12) limits, as `Options` fields, because without compaction a stop limit would block writes for good
+- Test hook (approved): `DBImpl::SetSynchronousFlushForTesting` makes a write that switches memtables wait for its flush, so the step-by-step crash tests (`FlushCrashTest`), the deterministic crash torture variants and the corruption suite replay exactly; the new `CrashTortureTest.CrashesDuringBackgroundFlushes`, the model and stress tests run asynchronous. `FaultInjectionFileSystem::KillProcess()` makes a crash "with the DB open" safe with a second thread: kill, destroy the DB, then crash
 
 ### 4.3 Leveled compaction
 - [ ] Triggers: L0 file count (e.g., 4); level byte targets growing 10× per level
@@ -397,5 +398,6 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - [ ] File systems without POSIX delete (FAT32, some network shares, Wine) keep a removed file's name until its last handle closes (ADR 0002, rule 7)
 - [ ] Database paths are limited to MAX_PATH unless Windows long paths are enabled
 - [ ] Real damage (not a crash) in the newest log drops the writes after it instead of failing the open (point-in-time, reported in `RecoveryInfo`; ADR 0004 rule 6)
+- [ ] Snapshots are not saved: they end when the DB is closed
 - [ ] Until compaction (Phase 4), every flush and every open with unflushed writes adds a level-0 table, and reads consider every level-0 table
 - [ ] A newest log truncated exactly at a record boundary looks like a log whose last writes never reached the disk: those writes are lost without a report (found by the corruption suite, 3.9)

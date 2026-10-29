@@ -1,5 +1,5 @@
-// DBImpl: the DB implementation. Phase 3: a memtable and a write-ahead log,
-// flushed to table files recorded in a MANIFEST.
+// DBImpl: the DB implementation: a memtable and a write-ahead log, flushed by
+// a background thread to table files recorded in a MANIFEST; snapshots.
 //
 // Write path (group commit)
 //   Every Write queues a Writer under mutex_ and waits. The writer at the
@@ -17,18 +17,31 @@
 //   last_sequence_, and entries above it are invisible, so a group appears
 //   all at once.
 //
-// Flush (Phase 3.5)
+// Flush (Phase 3.5; in the background since 4.2)
 //   Before writing, a leader that finds the memtable at memtable_bytes or
 //   more switches: it syncs the current log (so a crash can only damage the
 //   newest log, and recovery still yields a prefix of the writes), starts a
-//   new log, and turns the memtable into the immutable memtable (imm_). Then,
-//   with mutex_ released, it writes imm_ to a new level-0 table, syncs it,
+//   new log, turns the memtable into the immutable memtable (imm_), hands it
+//   to the background thread and goes on writing. If imm_ is still there
+//   from the last switch (its flush is still running), the leader waits for
+//   it first: a stall, counted in stalls_.
+//
+//   The background thread writes imm_ to a new level-0 table, syncs it,
 //   records it in the MANIFEST (synced), installs the new Version and drops
 //   imm_. The old log is deleted one flush later, once another MANIFEST
 //   record follows the one that retired it (ADR 0007: a damaged last record
-//   is ignored, so the data it records must still be in a log). Writers wait
-//   meanwhile (until a background thread takes over, Phase 4.2); readers
-//   keep reading imm_ until the table is installed.
+//   is ignored, so the data it records must still be in a log). Readers keep
+//   reading imm_ until the table is installed.
+//
+//   Only the background thread uses the VersionSet after the open, except
+//   that the leader takes the new log's file number when it switches, which
+//   it does only while imm_ is empty, i.e. while no flush is running.
+//
+// Shutdown
+//   The destructor tells the background thread to stop and joins it. A flush
+//   that is running is finished; one that has not started is not: its writes
+//   are in the logs (the old one synced at the switch), which the next open
+//   replays.
 //
 // Reads
 //   A read takes, under mutex_, the memtable, imm_, the current Version and
@@ -39,8 +52,13 @@
 // Errors
 //   If appending, syncing or flushing fails, what is on disk is unknown.
 //   Every member of the group gets the error, and it becomes the sticky
-//   background_error_: every later write fails with it. Reads go on. Nothing
-//   is lost: a log is deleted only after the MANIFEST records its contents.
+//   background_error_: every later write fails with it, including a writer
+//   waiting for a flush. Reads go on. Nothing is lost: a log is deleted only
+//   after the MANIFEST records its contents.
+//
+// Snapshots (Phase 4.1)
+//   A snapshot is a sequence number registered in snapshots_; a read with
+//   one uses it instead of last_sequence_.
 //
 // Open and recovery (Phase 3.6)
 //   Open locks <db>/LOCK for the DB's lifetime and recovers the MANIFEST to
@@ -64,11 +82,13 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "forgedb/db.h"
 
 #include "db/internal_key.h"
+#include "db/snapshot.h"
 #include "db/table_cache.h"
 #include "db/version_edit.h"
 #include "db/version_set.h"
@@ -126,15 +146,32 @@ class DBImpl final : public DB {
   [[nodiscard]] Status Write(const WriteOptions& options, const WriteBatch& batch) override;
   [[nodiscard]] Result<std::string> Get(const ReadOptions& options, std::string_view key) override;
   [[nodiscard]] std::unique_ptr<Iterator> NewIterator(const ReadOptions& options) override;
+  [[nodiscard]] std::shared_ptr<const Snapshot> GetSnapshot() override;
 
   // For tools (forgedb_cli stats) and tests.
   [[nodiscard]] SequenceNumber LastSequence();
   [[nodiscard]] std::shared_ptr<const Version> CurrentVersion();
   [[nodiscard]] const RecoveryInfo& GetRecoveryInfo() const noexcept { return recovery_; }
 
+  // Times a writer had to wait for a flush to finish, and for how long.
+  struct Stalls {
+    std::uint64_t count = 0;
+    std::uint64_t microseconds = 0;
+  };
+  [[nodiscard]] Stalls GetStalls();
+
   // For tests.
   [[nodiscard]] std::uint64_t GroupsWrittenForTesting();
   [[nodiscard]] std::uint64_t FlushesForTesting();
+  [[nodiscard]] std::optional<SequenceNumber> OldestSnapshotForTesting() const;
+  // While on, a write that switches memtables waits for that flush to finish,
+  // so the file operations of a run come in the same order every time (the
+  // step-by-step crash tests need that).
+  void SetSynchronousFlushForTesting(bool on);
+  // Waits until no flush is queued or running (or the background error is set).
+  void WaitForFlushForTesting();
+  // Whether a flush is queued or running (imm_ is set).
+  [[nodiscard]] bool FlushPendingForTesting();
 
  private:
   // A Write waiting in the queue.
@@ -153,9 +190,18 @@ class DBImpl final : public DB {
     MemTableRef memtable;
     MemTableRef immutable;  // may be empty
     std::shared_ptr<const Version> version;
-    SequenceNumber sequence = 0;
+    SequenceNumber sequence = 0;  // the snapshot's, or last_sequence_
   };
-  [[nodiscard]] ReadView CurrentReadView();
+  // InvalidArgument if options.snapshot is not one of this DB's.
+  [[nodiscard]] Result<ReadView> CurrentReadView(const ReadOptions& options);
+
+  // A flush handed to the background thread.
+  struct FlushJob {
+    MemTableRef memtable;                // imm_
+    SequenceNumber flushed_through = 0;  // its last sequence number
+    std::uint64_t new_log = 0;           // the first log recovery will need
+    std::uint64_t old_log = 0;           // the log it replaces
+  };
 
   // Leader only, mutex_ held. Joins the batches of the writers at the front
   // of the queue into group_batch_; returns the last writer included and
@@ -166,13 +212,20 @@ class DBImpl final : public DB {
   };
   [[nodiscard]] Group BuildGroup();
 
-  // Leader only, mutex_ held via `lock` (released around I/O). Flushes the
-  // memtable if it is full (see "Flush" at the top). On error sets
-  // background_error_ and returns it.
+  // Leader only, mutex_ held via `lock` (released around I/O and while
+  // waiting). Switches memtables if the memtable is full, waiting for the
+  // previous flush first (see "Flush" at the top). Returns
+  // background_error_ if it is set, or sets it if switching fails.
   [[nodiscard]] Status MakeRoomForWrite(std::unique_lock<std::mutex>& lock);
+  [[nodiscard]] Status SwitchMemtable(std::unique_lock<std::mutex>& lock);
+
+  // The background thread's loop, and one flush (mutex_ not held).
+  void BackgroundThread();
+  [[nodiscard]] Status RunFlush(const FlushJob& job);
 
   // Writes `memtable` to a new level-0 table, synced and closed, and adds it
-  // to `edit`. Writes nothing for an empty memtable. Open or leader only.
+  // to `edit`. Writes nothing for an empty memtable. Open or background
+  // thread only.
   [[nodiscard]] Status WriteLevel0Table(MemTable& memtable, VersionEdit& edit);
 
   // Replays log `number` into `memtable`, continuing from `last_sequence`.
@@ -202,16 +255,27 @@ class DBImpl final : public DB {
   SequenceNumber last_sequence_ = 0;        // guarded by mutex_
   std::uint64_t groups_written_ = 0;        // guarded by mutex_
   std::uint64_t flushes_ = 0;               // guarded by mutex_
+  Stalls stalls_;                           // guarded by mutex_
+  std::optional<FlushJob> pending_flush_;   // guarded by mutex_; for the background thread
+  bool shutting_down_ = false;              // guarded by mutex_
+  bool synchronous_flush_ = false;          // guarded by mutex_
+  // The log the last flush retired, kept until the next MANIFEST record.
+  std::optional<std::uint64_t> retired_log_;  // guarded by mutex_
+  std::condition_variable work_cv_;           // wakes the background thread
+  std::condition_variable done_cv_;           // a flush finished or failed: wakes waiting writers
+  const std::shared_ptr<SnapshotList> snapshots_ = std::make_shared<SnapshotList>();
 
-  // Used only by Recover() and then by the current leader.
+  // Used by Recover(), then by the background thread (see "Flush").
   std::unique_ptr<VersionSet> versions_;
+  // Used only by Recover() and then by the current leader.
   std::unique_ptr<WritableFile> log_file_;
   std::unique_ptr<log::Writer> log_;
   std::uint64_t log_number_ = 0;
-  // The log the last flush retired, kept until the next MANIFEST record.
-  std::optional<std::uint64_t> retired_log_;
   std::uint64_t mem_entries_ = 0;  // entries in mem_ (a group adds its count)
   WriteBatch group_batch_;
+
+  // Started by Recover(), joined by the destructor.
+  std::thread background_thread_;
 };
 
 }  // namespace forgedb

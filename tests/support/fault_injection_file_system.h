@@ -46,6 +46,12 @@
 //                                   that changes the file system: it and every
 //                                   later call fail and change nothing, until
 //                                   SimulateCrash
+//   KillProcess()                   the same, now. For a crash while another
+//                                   thread (the DB's background thread) may
+//                                   still use the file system: kill, let the
+//                                   threads stop (their calls fail), then
+//                                   SimulateCrash. A call made after
+//                                   SimulateCrash belongs to the next process.
 //
 // Randomness comes from Options::seed, so a single-threaded test that makes
 // the same calls gets the same faults and the same crash outcomes.
@@ -153,7 +159,11 @@ class FaultInjectionFileSystem final : public FileSystem {
   void CrashAtOperation(std::uint64_t n);
   // Operations that changed (or tried to change) the file system so far.
   [[nodiscard]] std::uint64_t OperationCount() const;
-  // True once CrashAtOperation has fired, until SimulateCrash.
+  // The process dies now: every later call fails and changes nothing, until
+  // SimulateCrash.
+  void KillProcess();
+  // True once CrashAtOperation has fired or KillProcess was called, until
+  // SimulateCrash.
   [[nodiscard]] bool ProcessIsDead() const;
 
   // --- Crashing ---

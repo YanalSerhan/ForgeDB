@@ -1,6 +1,7 @@
 #include "db/db_impl.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -12,6 +13,7 @@
 
 #include "db/db_iter.h"
 #include "db/filename.h"
+#include "db/snapshot.h"
 #include "db/version_edit.h"
 #include "db/version_set.h"
 #include "db/write_batch_internal.h"
@@ -262,6 +264,7 @@ Status DBImpl::Recover() {
   version_ = versions_->Current();
   mem_ = MemTable::Create();
   DeleteObsoleteFiles();
+  background_thread_ = std::thread([this] { BackgroundThread(); });
   return Status::OK();
 }
 
@@ -270,12 +273,7 @@ void DBImpl::DeleteObsoleteFiles() {
   if (!children.ok()) {
     return;  // they will be deleted at the next open
   }
-  std::vector<std::uint64_t> live;
-  for (const std::vector<FileMetaData>& level : version_->files) {
-    for (const FileMetaData& file : level) {
-      live.push_back(file.number);
-    }
-  }
+  const std::vector<std::uint64_t> live = versions_->LiveFiles();
   for (const std::string& child : *children) {
     const std::optional<ParsedFileName> parsed = ParseFileName(child);
     if (!parsed) {
@@ -287,7 +285,7 @@ void DBImpl::DeleteObsoleteFiles() {
         obsolete = parsed->number < log_number_;
         break;
       case FileType::kTable:
-        obsolete = std::ranges::find(live, parsed->number) == live.end();
+        obsolete = !std::ranges::binary_search(live, parsed->number);
         break;
       case FileType::kDescriptor:
         obsolete = parsed->number != versions_->ManifestNumber();
@@ -336,6 +334,16 @@ Status DB::Delete(const WriteOptions& options, std::string_view key) {
 DBImpl::~DBImpl() {
   // Destroying a DB while writes are in flight is a caller bug.
   FORGEDB_DCHECK(writers_.empty());
+  // Stop the background thread: it finishes a flush that is running and
+  // starts nothing new (see "Shutdown" in db_impl.h).
+  {
+    const std::scoped_lock lock(mutex_);
+    shutting_down_ = true;
+  }
+  work_cv_.notify_all();
+  if (background_thread_.joinable()) {
+    background_thread_.join();
+  }
   // The destructor can't report errors; every acknowledged write has already
   // been flushed (and synced, if asked). Close the files, then release LOCK,
   // so the next owner finds nothing of ours open.
@@ -473,13 +481,44 @@ std::shared_ptr<const Version> DBImpl::CurrentVersion() {
 }
 
 Status DBImpl::MakeRoomForWrite(std::unique_lock<std::mutex>& lock) {
-  if (mem_entries_ == 0 || mem_->ApproximateMemoryUsage() < options_.memtable_bytes) {
-    return Status::OK();
+  bool stalled = false;
+  const auto stall_start = std::chrono::steady_clock::now();
+  Status status;
+  while (true) {
+    if (!background_error_.ok()) {
+      status = background_error_;
+      break;
+    }
+    if (mem_entries_ == 0 || mem_->ApproximateMemoryUsage() < options_.memtable_bytes) {
+      break;  // room in the memtable
+    }
+    if (imm_) {
+      // The last switch's flush is still running: wait for it (a stall).
+      stalled = true;
+      done_cv_.wait(lock);
+      continue;
+    }
+    status = SwitchMemtable(lock);
+    if (status.ok() && synchronous_flush_) {
+      done_cv_.wait(lock, [this] { return !imm_ || !background_error_.ok(); });
+      status = background_error_;
+    }
+    break;
   }
+  if (stalled) {
+    ++stalls_.count;
+    stalls_.microseconds +=
+        static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                       std::chrono::steady_clock::now() - stall_start)
+                                       .count());
+  }
+  return status;
+}
 
-  // 1. Switch logs. Sync the old one first: writes in the new log must not
-  //    survive a crash that loses older, unsynced ones (recovery yields a
-  //    prefix of the writes, never a hole).
+Status DBImpl::SwitchMemtable(std::unique_lock<std::mutex>& lock) {
+  // Sync the old log first: writes in the new log must not survive a crash
+  // that loses older, unsynced ones (recovery yields a prefix of the writes,
+  // never a hole). Taking a file number is safe here: no flush is running.
   const std::uint64_t old_log = log_number_;
   const std::uint64_t new_log = versions_->NewFileNumber();
   lock.unlock();
@@ -503,47 +542,100 @@ Status DBImpl::MakeRoomForWrite(std::unique_lock<std::mutex>& lock) {
   imm_ = std::move(mem_);
   mem_ = MemTable::Create();
   mem_entries_ = 0;
-  const SequenceNumber flushed_through = last_sequence_;
-  const MemTableRef immutable = imm_;
-
-  // 2. Write the immutable memtable to a table and record it, with the new
-  //    log as the first one recovery needs.
-  lock.unlock();
-  VersionEdit edit;
-  status = WriteLevel0Table(*immutable, edit);
-  if (status.ok()) {
-    edit.log_number = new_log;
-    edit.last_sequence = flushed_through;
-    status = versions_->LogAndApply(std::move(edit));
-  }
-  lock.lock();
-  if (!status.ok()) {
-    // imm_ stays readable; its data is still in the old log.
-    background_error_ = status;
-    return status;
-  }
-  version_ = versions_->Current();
-  imm_.Reset();
-  ++flushes_;
-
-  // 3. The old log is redundant now, but is kept until the next MANIFEST
-  //    record is synced: if this edit, the MANIFEST's last record, is later
-  //    damaged, recovery cannot tell it from a torn write and ignores it, and
-  //    then replays the old log instead (ADR 0007). The log this flush's
-  //    predecessor retired is deleted now; if that fails, the next open
-  //    deletes it.
-  const std::optional<std::uint64_t> obsolete_log = std::exchange(retired_log_, old_log);
-  if (obsolete_log) {
-    lock.unlock();
-    static_cast<void>(file_system_->RemoveFile(LogFileName(name_, *obsolete_log)));
-    lock.lock();
-  }
+  pending_flush_ = FlushJob{
+      .memtable = imm_, .flushed_through = last_sequence_, .new_log = new_log, .old_log = old_log};
+  work_cv_.notify_one();
   return Status::OK();
 }
 
-DBImpl::ReadView DBImpl::CurrentReadView() {
+void DBImpl::BackgroundThread() {
+  std::unique_lock lock(mutex_);
+  while (true) {
+    work_cv_.wait(lock, [this] { return shutting_down_ || pending_flush_.has_value(); });
+    if (shutting_down_ || !pending_flush_) {
+      return;  // a queued flush stays in the logs (see "Shutdown")
+    }
+    const FlushJob job = std::move(*pending_flush_);
+    pending_flush_.reset();
+
+    lock.unlock();
+    const Status status = RunFlush(job);
+    lock.lock();
+
+    std::optional<std::uint64_t> obsolete_log;
+    if (status.ok()) {
+      version_ = versions_->Current();
+      imm_.Reset();
+      ++flushes_;
+      // The old log is kept until the next MANIFEST record (ADR 0007); the
+      // one the previous flush retired can go.
+      obsolete_log = std::exchange(retired_log_, job.old_log);
+    } else {
+      // imm_ stays readable; its writes are still in the old log.
+      background_error_ = status;
+    }
+    done_cv_.notify_all();
+    if (obsolete_log) {
+      lock.unlock();
+      // If this fails, the next open deletes it.
+      static_cast<void>(file_system_->RemoveFile(LogFileName(name_, *obsolete_log)));
+      lock.lock();
+    }
+  }
+}
+
+Status DBImpl::RunFlush(const FlushJob& job) {
+  VersionEdit edit;
+  FORGEDB_RETURN_IF_ERROR(WriteLevel0Table(*job.memtable, edit));
+  // The new log is the first one recovery needs from now on.
+  edit.log_number = job.new_log;
+  edit.last_sequence = job.flushed_through;
+  return versions_->LogAndApply(std::move(edit));
+}
+
+DBImpl::Stalls DBImpl::GetStalls() {
   const std::scoped_lock lock(mutex_);
-  return {.memtable = mem_, .immutable = imm_, .version = version_, .sequence = last_sequence_};
+  return stalls_;
+}
+
+std::optional<SequenceNumber> DBImpl::OldestSnapshotForTesting() const {
+  return snapshots_->Oldest();
+}
+
+void DBImpl::SetSynchronousFlushForTesting(bool on) {
+  const std::scoped_lock lock(mutex_);
+  synchronous_flush_ = on;
+}
+
+void DBImpl::WaitForFlushForTesting() {
+  std::unique_lock lock(mutex_);
+  done_cv_.wait(lock, [this] { return !imm_ || !background_error_.ok(); });
+}
+
+bool DBImpl::FlushPendingForTesting() {
+  const std::scoped_lock lock(mutex_);
+  return static_cast<bool>(imm_);
+}
+
+std::shared_ptr<const Snapshot> DBImpl::GetSnapshot() {
+  const std::scoped_lock lock(mutex_);
+  return std::make_shared<const SnapshotImpl>(snapshots_, last_sequence_);
+}
+
+Result<DBImpl::ReadView> DBImpl::CurrentReadView(const ReadOptions& options) {
+  std::optional<SequenceNumber> snapshot_sequence;
+  if (options.snapshot != nullptr) {
+    const auto* snapshot = dynamic_cast<const SnapshotImpl*>(options.snapshot.get());
+    if (snapshot == nullptr || snapshot->List() != snapshots_.get()) {
+      return Status::InvalidArgument("ReadOptions::snapshot was not made by this DB");
+    }
+    snapshot_sequence = snapshot->Sequence();
+  }
+  const std::scoped_lock lock(mutex_);
+  return ReadView{.memtable = mem_,
+                  .immutable = imm_,
+                  .version = version_,
+                  .sequence = snapshot_sequence.value_or(last_sequence_)};
 }
 
 namespace {
@@ -562,9 +654,9 @@ Result<std::string> FoundOrNotFound(MemTable::GetResult result, std::string&& va
 
 }  // namespace
 
-Result<std::string> DBImpl::Get(const ReadOptions& /*options*/, std::string_view key) {
+Result<std::string> DBImpl::Get(const ReadOptions& options, std::string_view key) {
   FORGEDB_RETURN_IF_ERROR(CheckKeySize(key));
-  const ReadView view = CurrentReadView();
+  FORGEDB_ASSIGN_OR_RETURN(const ReadView view, CurrentReadView(options));
   const LookupKey lookup(key, view.sequence);
   std::string value;
 
@@ -597,8 +689,12 @@ Result<std::string> DBImpl::Get(const ReadOptions& /*options*/, std::string_view
   return Status::NotFound("key not found");
 }
 
-std::unique_ptr<Iterator> DBImpl::NewIterator(const ReadOptions& /*options*/) {
-  ReadView view = CurrentReadView();
+std::unique_ptr<Iterator> DBImpl::NewIterator(const ReadOptions& options) {
+  Result<ReadView> read_view = CurrentReadView(options);
+  if (!read_view.ok()) {
+    return NewErrorIterator(read_view.status());
+  }
+  ReadView view = std::move(read_view).value();
   std::vector<std::unique_ptr<Iterator>> children;
   children.push_back(NewMemTableIterator(std::move(view.memtable)));
   if (view.immutable) {

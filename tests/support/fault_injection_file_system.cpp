@@ -307,6 +307,12 @@ std::uint64_t FaultInjectionFileSystem::OperationCount() const {
   return operations_;
 }
 
+void FaultInjectionFileSystem::KillProcess() {
+  const std::scoped_lock lock(mutex_);
+  crash_at_ = 0;
+  dead_.store(true);
+}
+
 bool FaultInjectionFileSystem::ProcessIsDead() const { return dead_.load(); }
 
 std::vector<FaultInjectionFileSystem::CrashedFile> FaultInjectionFileSystem::LastCrash() const {
@@ -316,7 +322,8 @@ std::vector<FaultInjectionFileSystem::CrashedFile> FaultInjectionFileSystem::Las
 
 Status FaultInjectionFileSystem::DeadStatus() {
   return Status::IOError("simulated crash",
-                         "the process is dead (FaultInjectionFileSystem::CrashAtOperation)");
+                         "the process is dead (FaultInjectionFileSystem::CrashAtOperation or "
+                         "KillProcess)");
 }
 
 Status FaultInjectionFileSystem::StaleStatus() {

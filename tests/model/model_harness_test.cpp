@@ -135,6 +135,7 @@ class DBThatIgnoresDeletesOf final : public DB {
   std::unique_ptr<Iterator> NewIterator(const ReadOptions& options) override {
     return real_->NewIterator(options);
   }
+  std::shared_ptr<const Snapshot> GetSnapshot() override { return real_->GetSnapshot(); }
 
  private:
   std::unique_ptr<DB> real_;
@@ -200,6 +201,80 @@ TEST(ModelHarnessTest, GeneratorReopensAboutAsOftenAsAsked) {
   }
   EXPECT_GE(reopens, 20U);
   EXPECT_LE(reopens, 60U);
+}
+
+TEST(ModelHarnessTest, GeneratorMakesSnapshotOperationsOnlyWhenAsked) {
+  GeneratorOptions options;
+  options.snapshot_slots = 3;
+  options.expected_snapshots = 100;
+  OpGenerator with(4, 20000, options);
+  OpGenerator without(4, 20000);
+  std::set<Op::Kind> kinds;
+  std::size_t takes = 0;
+  for (int i = 0; i < 20000; ++i) {
+    const Op op = with.Next();
+    kinds.insert(op.kind);
+    takes += op.kind == Op::Kind::kTakeSnapshot ? 1U : 0U;
+    EXPECT_LT(op.slot, 3U);
+    const Op::Kind plain = without.Next().kind;
+    EXPECT_NE(plain, Op::Kind::kTakeSnapshot);
+    EXPECT_NE(plain, Op::Kind::kGetAtSnapshot);
+  }
+  EXPECT_TRUE(kinds.contains(Op::Kind::kTakeSnapshot));
+  EXPECT_TRUE(kinds.contains(Op::Kind::kReleaseSnapshot));
+  EXPECT_TRUE(kinds.contains(Op::Kind::kGetAtSnapshot));
+  EXPECT_TRUE(kinds.contains(Op::Kind::kSeekAtSnapshot));
+  EXPECT_GE(takes, 60U) << "about 100";
+  EXPECT_LE(takes, 140U);
+}
+
+TEST(ModelHarnessTest, AgreesWithACorrectDBAtSnapshots) {
+  RunOptions options = SeedAndOps(6, 20000, 10);
+  options.generator.snapshot_slots = 3;
+  options.generator.expected_snapshots = 100;
+  EXPECT_EQ(RunModelTest(ReopenableMemoryDB(), options), "");
+}
+
+// A planted snapshot bug: reads at a snapshot ignore it and read the latest
+// data. The harness must notice and shrink it to: take, write, read at it.
+class DBThatIgnoresSnapshots final : public DB {
+ public:
+  explicit DBThatIgnoresSnapshots(std::unique_ptr<DB> real) : real_(std::move(real)) {}
+  Status Write(const WriteOptions& options, const WriteBatch& batch) override {
+    return real_->Write(options, batch);
+  }
+  Result<std::string> Get(const ReadOptions& /*options*/, std::string_view key) override {
+    return real_->Get({}, key);
+  }
+  std::unique_ptr<Iterator> NewIterator(const ReadOptions& /*options*/) override {
+    return real_->NewIterator({});
+  }
+  std::shared_ptr<const Snapshot> GetSnapshot() override { return real_->GetSnapshot(); }
+
+ private:
+  std::unique_ptr<DB> real_;
+};
+
+TEST(ModelHarnessTest, CatchesASnapshotBugAndShrinksIt) {
+  RunOptions options = SeedAndOps(5, 20000);
+  options.generator.snapshot_slots = 3;
+  options.generator.expected_snapshots = 100;
+  const std::string report = RunModelTest(
+      DbSetup([]() -> Result<std::unique_ptr<DB>> {
+        FORGEDB_ASSIGN_OR_RETURN(std::unique_ptr<DB> real, OpenMemoryDB());
+        return std::unique_ptr<DB>(std::make_unique<DBThatIgnoresSnapshots>(std::move(real)));
+      }),
+      options);
+  ASSERT_NE(report, "") << "the snapshot bug must be found";
+  SCOPED_TRACE(report);
+  EXPECT_EQ(report.find("may not be minimal"), std::string::npos);
+  const std::size_t start = report.find("Minimal reproduction (");
+  ASSERT_NE(start, std::string::npos);
+  const std::size_t count =
+      std::stoul(report.substr(start + std::string("Minimal reproduction (").size()));
+  EXPECT_GE(count, 3U);
+  EXPECT_LE(count, 4U);
+  EXPECT_NE(report.find("GetSnapshot()", start), std::string::npos);
 }
 
 TEST(ModelHarnessTest, QuoteEscapesBytes) {
@@ -279,9 +354,10 @@ TEST(ModelHarnessTest, ShrinkResultStillFailsAndIsOneMinimal) {
   {
     std::unique_ptr<DB> db = std::move(OpenBuggyDB()).value();
     Model model;
+    Snapshots snapshots;
     while (!failure && ops.size() < 20000) {
       ops.push_back(generator.Next());
-      if (std::optional<std::string> problem = Apply(db, buggy, model, ops.back())) {
+      if (std::optional<std::string> problem = Apply(db, buggy, model, snapshots, ops.back())) {
         failure = Failure{.op_index = ops.size() - 1, .message = *problem};
       }
     }

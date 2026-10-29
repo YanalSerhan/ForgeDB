@@ -69,7 +69,10 @@ TEST_P(MemoryDBModelTest, AgreesWithStdMap) {
 // more). The memtable is sized for about 100 flushes per run whatever the
 // operation count (the generator writes about 66 bytes of memtable per
 // operation, measured): without compaction (Phase 4) every flush adds a
-// level-0 table that every read must consider.
+// level-0 table that every read must consider. Flushes run in the background
+// thread (4.2). Since 4.1 the run also takes snapshots (about 200, in 4
+// slots) and reads at them, compared with copies of the model, while their
+// data moves into tables.
 TEST_P(MemoryDBModelTest, AgreesWithStdMapAcrossFlushes) {
   Options db_options;
   db_options.memtable_bytes = std::max(std::size_t{16} << 10, OperationsPerSeed() * 64 / 100);
@@ -85,6 +88,8 @@ TEST_P(MemoryDBModelTest, AgreesWithStdMapAcrossFlushes) {
   options.seed = GetParam();
   options.operations = OperationsPerSeed();
   options.generator.expected_reopens = 5;
+  options.generator.snapshot_slots = 4;
+  options.generator.expected_snapshots = 200;
   EXPECT_EQ(RunModelTest(setup, options), "");
 
   // The run must really have flushed: count the tables it left.

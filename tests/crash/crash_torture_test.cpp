@@ -197,6 +197,10 @@ struct TortureOptions {
   // How the DB is opened: a tiny memtable_bytes flushes on almost every write,
   // so crashes land in flushes, MANIFEST writes and CURRENT switches.
   Options db;
+  // A write that switches memtables waits for its flush (a DBImpl test hook),
+  // so a seed replays exactly; off, flushes overlap writes as in real use,
+  // and a seed reproduces a failure only most of the time.
+  bool synchronous_flush = true;
 };
 
 // What the runs actually exercised: a test that passes without crashing
@@ -278,6 +282,7 @@ class Torture {
       return "open failed: " + opened.status().ToString();
     }
     db_ = std::move(opened).value();
+    dynamic_cast<DBImpl&>(*db_).SetSynchronousFlushForTesting(options_.synchronous_flush);
     if (std::string problem = CheckRecovery(); !problem.empty()) {
       return problem;
     }
@@ -325,7 +330,9 @@ class Torture {
     // 4. Before the crash, readers see exactly the acknowledged writes: not
     //    the failed one, even if part of it reached the log. Skipped if the
     //    simulated process died mid-operation: reads open table files
-    //    (Phase 3), and a dead process can do nothing.
+    //    (Phase 3), and a dead process can do nothing. A background flush
+    //    still running could kill the process during the reads: wait for it.
+    dynamic_cast<DBImpl&>(*db_).WaitForFlushForTesting();
     const bool dead = fs_->ProcessIsDead();
     if (!dead) {
       State live = next.start;
@@ -350,14 +357,17 @@ class Torture {
       next.lowest = acknowledged;
       next.how_it_ended = "clean close";
     } else {
-      const bool crash_first = random_.Percent(50);  // with the DB still open, or after closing it
-      if (!crash_first) {
-        db_.reset();
+      // With the DB still open, or after closing it. "Still open" kills the
+      // process first, so the background thread can do nothing more, then
+      // destroys the DB (its calls fail and change nothing), then crashes.
+      const bool crash_first = random_.Percent(50);
+      if (crash_first) {
+        fs_->KillProcess();
       }
+      db_.reset();
       if (const Status status = fs_->SimulateCrash(kind); !status.ok()) {
         return "SimulateCrash failed: " + status.ToString();
       }
-      db_.reset();
       if (kind == CrashKind::kPowerLoss) {
         ++stats_->power_losses;
         next.lowest = synced;
@@ -559,6 +569,18 @@ TortureOptions WithFlushes() {
 
 TEST(CrashTortureTest, CrashesDuringFlushes) {
   const Stats stats = RunAll("flushes", WithFlushes());
+  ExpectEverythingExercised(stats);
+  if (stats.cycles >= 100) {
+    EXPECT_GT(stats.flushes, stats.cycles) << "most cycles flushed at least once";
+  }
+}
+
+// TODO 4.2: the same with flushes overlapping writes, as in real use: crashes
+// land while the background thread is writing a table or the MANIFEST.
+TEST(CrashTortureTest, CrashesDuringBackgroundFlushes) {
+  TortureOptions options = WithFlushes();
+  options.synchronous_flush = false;
+  const Stats stats = RunAll("background flushes", options);
   ExpectEverythingExercised(stats);
   if (stats.cycles >= 100) {
     EXPECT_GT(stats.flushes, stats.cycles) << "most cycles flushed at least once";

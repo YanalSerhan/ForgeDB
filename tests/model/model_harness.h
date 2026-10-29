@@ -49,17 +49,26 @@ struct Op {
     kScan,        // a full scan with a new iterator
     kSeek,        // a new iterator, Seek(key), then next_count x Next
     kReopen,      // close the DB and open it again on the same storage
+    // Snapshots (Phase 4.1). Each of a few slots holds a snapshot and a copy
+    // of the model taken with it; reads at an empty slot do nothing, so
+    // shrinking may drop any of these. A reopen empties every slot.
+    kTakeSnapshot,     // slot = DB::GetSnapshot()
+    kReleaseSnapshot,  // drop the slot's snapshot
+    kGetAtSnapshot,    // DB::Get(key) at the slot's snapshot
+    kSeekAtSnapshot,   // like kSeek, at the slot's snapshot
   };
   Kind kind = Kind::kGet;
   std::vector<Mutation> mutations;
   std::string key;
   std::size_t next_count = 0;
+  std::size_t slot = 0;  // snapshot operations
 
-  // Whether the operation can change what later reads see (a write, or a
-  // reopen, which can lose data if recovery is wrong). Shrinking keeps these.
+  // Whether the operation can change what later reads see (a write, a
+  // reopen, which can lose data if recovery is wrong, or a snapshot taken or
+  // released). Shrinking keeps these.
   [[nodiscard]] bool ChangesState() const noexcept {
     return kind == Kind::kPut || kind == Kind::kDelete || kind == Kind::kWriteBatch ||
-           kind == Kind::kReopen;
+           kind == Kind::kReopen || kind == Kind::kTakeSnapshot || kind == Kind::kReleaseSnapshot;
   }
 };
 
@@ -86,6 +95,12 @@ struct GeneratorOptions {
   // Reopens per run (each replays the whole log, so they are rationed too).
   // 0 means none; set it only for a DbSetup with a reopen function.
   std::size_t expected_reopens = 0;
+  // Snapshot slots; 0 means no snapshot operations (and the same operations
+  // as before they existed, for a given seed). Taking a snapshot copies the
+  // model, so snapshots taken (and released) per run are rationed too; with
+  // slots, a third of Gets and Seeks read at a snapshot.
+  std::size_t snapshot_slots = 0;
+  std::size_t expected_snapshots = 0;
 };
 
 // A deterministic stream of operations: the same seed, operation count and
@@ -105,6 +120,7 @@ class OpGenerator {
   GeneratorOptions options_;
   double scan_probability_;
   double reopen_probability_;
+  double snapshot_probability_;
   std::mt19937_64 rng_;
   std::uint64_t counter_ = 0;              // numbers values, so reproductions are readable
   std::vector<std::string> recent_large_;  // so large keys get read and deleted too
@@ -113,6 +129,13 @@ class OpGenerator {
 
 using Model = std::map<std::string, std::string>;
 using DbOpener = std::function<Result<std::unique_ptr<DB>>()>;
+
+// The snapshot slots: a snapshot and the model as it was when it was taken.
+struct SavedSnapshot {
+  std::shared_ptr<const Snapshot> snapshot;
+  Model model;
+};
+using Snapshots = std::vector<std::optional<SavedSnapshot>>;
 
 // How the harness gets databases. `open` starts over on empty storage (every
 // run and every replay calls it first); `reopen`, if set, opens the storage
@@ -124,11 +147,12 @@ struct DbSetup {
   DbOpener reopen;
 };
 
-// Applies `op` to both `db` and `model` (a kReopen replaces `db`). For reads,
-// compares the DB's answer with the model's. Returns a description of the
-// problem: a mismatch, or a DB call that returned an error.
+// Applies `op` to both `db` and `model` (a kReopen replaces `db` and empties
+// `snapshots`). For reads, compares the DB's answer with the model's (or the
+// snapshot's saved model). Returns a description of the problem: a mismatch,
+// or a DB call that returned an error.
 [[nodiscard]] std::optional<std::string> Apply(std::unique_ptr<DB>& db, const DbSetup& setup,
-                                               Model& model, const Op& op);
+                                               Model& model, Snapshots& snapshots, const Op& op);
 
 struct Failure {
   std::size_t op_index = 0;

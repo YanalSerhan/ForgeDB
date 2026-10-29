@@ -3,12 +3,15 @@
 // Each struct starts empty and gains fields only when the engine can honour
 // them, so nothing here is a setting that silently does nothing:
 //   Options:       buffer sizes, caches, table settings (Phase 3)
-//   ReadOptions:   `snapshot`, read as of an earlier point in time (Phase 4)
+//   ReadOptions:   `snapshot`, read as of an earlier point in time (Phase 4.1)
 #pragma once
 
 #include <cstddef>
+#include <memory>
 
 namespace forgedb {
+
+class Snapshot;
 
 // How to open a database. DB::Open checks every field (InvalidArgument if one
 // is out of range).
@@ -46,7 +49,12 @@ struct WriteOptions {
   bool sync = false;
 };
 
-// Per-read settings (Get and NewIterator). Phase 1 has no settings yet.
-struct ReadOptions {};
+// Per-read settings (Get and NewIterator).
+struct ReadOptions {
+  // Read the database as it was when this snapshot was taken (see
+  // forgedb/snapshot.h); null reads the latest data. It must come from the
+  // same DB (InvalidArgument otherwise).
+  std::shared_ptr<const Snapshot> snapshot;
+};
 
 }  // namespace forgedb

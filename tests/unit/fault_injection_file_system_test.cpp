@@ -702,6 +702,30 @@ TEST(FaultInjectionFileSystemTest, CrashAtOperationKillsTheProcessThere) {
   EXPECT_TRUE(setup.fs->CreateDir(File("alive")).ok());
 }
 
+TEST(FaultInjectionFileSystemTest, KillProcessKillsItNow) {
+  const TestFs setup;
+  const std::unique_ptr<WritableFile> file = Create(*setup.fs, File("f"));
+  ASSERT_TRUE(file->Append("flushed").ok());
+  ASSERT_TRUE(file->Flush().ok());
+  const std::uint64_t before = setup.fs->OperationCount();
+  setup.fs->CrashAtOperation(100);  // superseded
+  setup.fs->KillProcess();
+  EXPECT_TRUE(setup.fs->ProcessIsDead());
+  // Like a thread still running in the dead process: nothing it does counts.
+  EXPECT_TRUE(IsIOError(file->Append(" more")));
+  EXPECT_TRUE(IsIOError(setup.fs->NewWritableFile(File("zombie")).status()));
+  EXPECT_TRUE(IsIOError(setup.fs->RemoveFile(File("f"))));
+  EXPECT_EQ(setup.fs->OperationCount(), before);
+
+  ASSERT_TRUE(setup.fs->SimulateCrash(CrashKind::kProcessCrash).ok());
+  EXPECT_FALSE(setup.fs->ProcessIsDead());
+  EXPECT_EQ(Contents(*setup.base, File("f")), "flushed");
+  EXPECT_EQ(Contents(*setup.base, File("zombie")), std::nullopt);
+  for (int i = 0; i < 200; ++i) {
+    ASSERT_TRUE(setup.fs->CreateDir(File("alive")).ok()) << "the old crash point is gone";
+  }
+}
+
 // --- With the database ---------------------------------------------------------------------
 
 std::string Get(DB& db, std::string_view key) {
