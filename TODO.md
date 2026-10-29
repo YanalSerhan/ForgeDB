@@ -278,10 +278,12 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - [x] README: architecture diagram, build steps, short feature list, current status (plus tools, known limitations, measured numbers with where they were measured)
 
 ### ✅ Exit gate — Phase 3 (minimum CV-worthy engine)
-- [ ] Data survives clean restarts and simulated crashes with flushes in progress
-- [ ] Corruption suite: zero wrong answers, zero crashes
-- [ ] Model test passes 1,000,000 operations across many flushes
-- [ ] **Checkpoint:** add ForgeDB to the CV now, even if later phases continue
+- [x] Data survives clean restarts and simulated crashes with flushes in progress: every Windows test preset (`msvc-debug`, `msvc-release`, `msvc-asan`, `clangcl-debug`, `clangcl-asan`) passes `FlushCrashTest` (a crash at each of the 523 operations of 120 writes with 2 flushes and of the 28 of an open, each followed by a power loss and by a process crash), `CrashTortureTest.CrashesDuringFlushes` and `...WithInjectedErrors`, and `ProcessKillTest`
+- [x] Corruption suite: zero wrong answers, zero crashes: `forgedb_corruption_tests` passes on every Windows test preset (500 trials per file type in `msvc-release`, 100 in the debug and ASan presets); Linux, 1,000 trials per file type: tables 293 opens refused with `Corruption` and 707 intact; logs 433 intact, 563 with the newest log's last writes dropped and reported, 4 cut at a record boundary (not detectable, see Known limitations); MANIFESTs 902 refused and 98 intact; 0 wrong answers
+- [x] Model test passes 1,000,000 operations across many flushes: Windows, `msvc-release`, 3 seeds × 1,000,000 operations (`AgreesWithStdMapAcrossFlushes`, 77, 75 and 70 s); Linux, gcc: 77, 80 and 78 tables at the end of the 3 seeds
+- [ ] **Checkpoint:** add ForgeDB to the CV now, even if later phases continue (the owner's step)
+
+> Phase 3 closed (2026-10-29): every exit-gate check met on Windows (commit 4625a16; all eight presets built, every test preset passed). The three new fuzz targets have had only the 60 s smoke runs on Windows; 15-minute runs on Linux (clang 18) were clean.
 
 ---
 
