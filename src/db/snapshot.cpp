@@ -15,7 +15,7 @@ SnapshotList::Entry SnapshotList::Add(SequenceNumber sequence) {
   return sequences_.insert(sequence);
 }
 
-void SnapshotList::Remove(Entry entry) {
+void SnapshotList::Remove(const Entry& entry) {
   const std::scoped_lock lock(mutex_);
   sequences_.erase(entry);
 }

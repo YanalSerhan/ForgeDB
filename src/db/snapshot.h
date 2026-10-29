@@ -23,7 +23,7 @@ class SnapshotList {
   using Entry = std::multiset<SequenceNumber>::iterator;
 
   [[nodiscard]] Entry Add(SequenceNumber sequence);
-  void Remove(Entry entry);
+  void Remove(const Entry& entry);
 
   // The oldest live snapshot's sequence number; nullopt if there is none.
   [[nodiscard]] std::optional<SequenceNumber> Oldest() const;
