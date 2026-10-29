@@ -189,12 +189,12 @@ TEST_F(SstDumpTest, EveryByteOfTheFileIsChecked) {
   const std::string original = Contents();
   ASSERT_GT(original.size(), 200U);
   for (std::size_t i = 0; i < original.size(); ++i) {
-    for (const unsigned char flip : {0x01, 0x80}) {
+    for (const int flip : {0x01, 0x80}) {
       std::string damaged = original;
       damaged[i] = static_cast<char>(static_cast<unsigned char>(damaged[i]) ^ flip);
       Replace(damaged);
       ASSERT_EQ(Run({"--entries", "000005.sst"}), 1)
-          << "byte " << i << " of " << original.size() << " flipped with " << int{flip} << "\n"
+          << "byte " << i << " of " << original.size() << " flipped with " << flip << "\n"
           << out_.str() << err_.str();
     }
   }
