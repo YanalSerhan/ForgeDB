@@ -86,6 +86,31 @@ Options SmallLevels() {
   return options;
 }
 
+// Version::CheckInvariants (checked after every flush and compaction in
+// assertion builds).
+TEST(VersionInvariantsTest, FindsEachKindOfBrokenLevel) {
+  Version version;
+  version.files[0] = {File(9, 10, "a", "z"), File(7, 10, "b", "c")};
+  version.files[1] = {File(3, 10, "a", "c"), File(4, 10, "d", "f")};
+  EXPECT_EQ(version.CheckInvariants(), "");
+
+  Version old_first = version;
+  std::swap(old_first.files[0][0], old_first.files[0][1]);
+  EXPECT_EQ(old_first.CheckInvariants(), "level 0: table 9 after table 7: not newest first");
+
+  Version overlap = version;
+  overlap.files[1][1] = File(4, 10, "c", "f");  // "c" is in both tables
+  EXPECT_EQ(overlap.CheckInvariants(), "level 1: table 4 starts at or before the end of table 3");
+
+  Version unsorted = version;
+  std::swap(unsorted.files[1][0], unsorted.files[1][1]);
+  EXPECT_NE(unsorted.CheckInvariants(), "");
+
+  Version backwards = version;
+  backwards.files[2] = {File(5, 10, "q", "p")};
+  EXPECT_EQ(backwards.CheckInvariants(), "level 2: table 5: smallest key above largest");
+}
+
 TEST(CompactionPickTest, LevelTargetsGrowTenfold) {
   const Options options = SmallLevels();
   EXPECT_EQ(MaxBytesForLevel(options, 1), 1000U);

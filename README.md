@@ -9,8 +9,8 @@ memtables are flushed to immutable, sorted table files with bloom filters, and a
 which files are live, so the database recovers to a consistent state after a crash. The core
 library has no third-party dependencies.
 
-**Status: Phase 4 in progress: snapshots, background flushes, leveled compaction and
-statistics are done; the long stress test is next.** Not for production use.
+**Status: Phase 4 in progress: snapshots, background flushes, leveled compaction, statistics
+and the stress test are done; the exit-gate runs and the concurrency ADR are next.** Not for production use.
 See [TODO.md](TODO.md) for the plan.
 
 ```cpp
@@ -185,6 +185,7 @@ powershell -ExecutionPolicy Bypass -File scripts\fuzz.ps1                # 1 hou
 | `forgedb_model_tests` | random operations, including closing and reopening, compared with `std::map` (3 seeds × 1,000,000 operations in release builds) |
 | `forgedb_crash_tests` | crash torture: thousands of simulated crashes on the fault-injection file system, including during flushes; process kill: real crashes with `TerminateProcess` |
 | `forgedb_corruption_tests` | bit flips, random or zeroed runs and truncations in tables, logs and MANIFESTs: the open fails with `Corruption`, or every read is right or `Corruption` (500 trials per file type in release builds) |
+| `forgedb_stress_tests` | 8 reader threads (Gets, scans, snapshot reads) and 1 to 4 writer threads on one database while it flushes and compacts, on real files and in memory: every read must be a state that existed while it ran, and a pause every 2 minutes compares the whole database with a model and reopens it (5 or 10 seconds per ctest run) |
 | fuzz targets (`clangcl-fuzz`) | on untrusted bytes: the log reader, write batch decoding, blocks, table files, version edits and MANIFEST recovery |
 
 **What the crash tests cover.** The process-kill test kills a real process on Windows, so it covers
@@ -194,7 +195,8 @@ fault-injection model of what Windows documents (ADR 0002), which the crash tort
 
 Longer runs than CI's: `FORGEDB_CRASH_CYCLES=10000` and `FORGEDB_KILL_RUNS=500` (environment
 variables for `forgedb_crash_tests`), `FORGEDB_CORRUPTION_TRIALS=5000` (for
-`forgedb_corruption_tests`), and `scripts\fuzz.ps1`.
+`forgedb_corruption_tests`), `scripts\fuzz.ps1`, and `scripts\stress.ps1` (by default three
+10-minute stress runs in the `msvc-asan` build, the Phase 4 exit gate).
 
 ## Tools
 

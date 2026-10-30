@@ -140,6 +140,28 @@ target_compile_definitions(forgedb_corruption_tests PRIVATE
 forgedb_target_defaults(forgedb_corruption_tests)
 gtest_discover_tests(forgedb_corruption_tests DISCOVERY_MODE PRE_TEST)
 
+# Stress test (TODO 4.5): 8 readers and 1 to 4 writers on one database
+# while it flushes and compacts, checked against a model
+# (stress/stress_test.cpp). Every ctest run is short; FORGEDB_STRESS_SECONDS
+# sets the length (the exit-gate runs: scripts/stress.ps1, 10 minutes each).
+add_executable(forgedb_stress_tests
+  stress/stress_test.cpp
+  stress/stress_workload.cpp
+)
+target_link_libraries(forgedb_stress_tests PRIVATE
+  forgedb::forgedb forgedb_test_support GTest::gtest_main)
+target_include_directories(forgedb_stress_tests PRIVATE
+  "${PROJECT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}")
+if(CMAKE_BUILD_TYPE STREQUAL "Release" AND NOT FORGEDB_ASAN)
+  set(forgedb_stress_seconds 10)
+else()
+  set(forgedb_stress_seconds 5)
+endif()
+target_compile_definitions(forgedb_stress_tests PRIVATE
+  FORGEDB_STRESS_TEST_SECONDS=${forgedb_stress_seconds})
+forgedb_target_defaults(forgedb_stress_tests)
+gtest_discover_tests(forgedb_stress_tests DISCOVERY_MODE PRE_TEST)
+
 # ASan canary (sanitizer builds only): a program that overflows a heap buffer
 # on purpose. The test passes only if ASan's report appears, which proves the
 # sanitizer is actually active. Exit code is ignored; the report is the signal.

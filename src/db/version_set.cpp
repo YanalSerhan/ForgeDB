@@ -69,6 +69,34 @@ std::size_t Version::NumFiles() const noexcept {
   return n;
 }
 
+std::string Version::CheckInvariants() const {
+  for (std::size_t level = 0; level < files.size(); ++level) {
+    const std::vector<FileMetaData>& tables = files[level];
+    const std::string where = "level " + std::to_string(level) + ": ";
+    for (std::size_t i = 0; i < tables.size(); ++i) {
+      const FileMetaData& table = tables[i];
+      const std::string name = "table " + std::to_string(table.number);
+      if (CompareInternalKeys(table.smallest, table.largest) > 0) {
+        return where + name + ": smallest key above largest";
+      }
+      if (i == 0) {
+        continue;
+      }
+      const FileMetaData& before = tables[i - 1];
+      if (level == 0) {
+        if (before.number <= table.number) {
+          return where + name + " after table " + std::to_string(before.number) +
+                 ": not newest first";
+        }
+      } else if (ExtractUserKey(before.largest) >= ExtractUserKey(table.smallest)) {
+        return where + name + " starts at or before the end of table " +
+               std::to_string(before.number);
+      }
+    }
+  }
+  return "";
+}
+
 VersionSet::VersionSet(FileSystem* fs, std::filesystem::path db_dir)
     : fs_(fs), db_dir_(std::move(db_dir)) {
   Install(std::make_shared<const Version>());

@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <functional>
 #include <optional>
 #include <string>
@@ -72,6 +73,19 @@ class SizeChecker final : public WriteBatch::Handler {
   Status status_;
   std::uint64_t bytes_ = 0;
 };
+
+// Assertion builds: every flush and compaction must leave the levels well
+// formed (Version::CheckInvariants; TODO 4.5).
+void DCheckVersion(const Version& version) {
+#ifdef FORGEDB_ENABLE_ASSERTS
+  if (const std::string problem = version.CheckInvariants(); !problem.empty()) {
+    std::fputs(("Version invariant broken: " + problem + "\n").c_str(), stderr);
+    FORGEDB_CHECK(problem.empty());
+  }
+#else
+  static_cast<void>(version);
+#endif
+}
 
 // Microseconds since `start`.
 std::uint64_t MicrosecondsSince(std::chrono::steady_clock::time_point start) {
@@ -719,6 +733,7 @@ void DBImpl::DoFlush(std::unique_lock<std::mutex>& lock) {
 
   if (status.ok()) {
     version_ = versions_->Current();
+    DCheckVersion(*version_);
     imm_.Reset();
     ++stats_.flushes;
     stats_.flush_microseconds += MicrosecondsSince(start);
@@ -770,6 +785,7 @@ void DBImpl::DoCompaction(std::unique_lock<std::mutex>& lock, const Compaction& 
   lock.lock();
   if (status.ok()) {
     version_ = versions_->Current();
+    DCheckVersion(*version_);
     const std::uint64_t elapsed = MicrosecondsSince(start);
     const std::uint64_t flushing = stats_.flush_microseconds - flush_microseconds;
     CompactionStats& level =

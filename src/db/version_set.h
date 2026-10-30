@@ -53,6 +53,12 @@ struct Version {
   std::array<std::vector<FileMetaData>, kNumLevels> files;
 
   [[nodiscard]] std::size_t NumFiles() const noexcept;
+
+  // What breaks the rules above, or "" if nothing does: level 0 not newest
+  // first, a table whose smallest key is above its largest, or (levels 1
+  // and below) tables out of order or sharing a user key. Checked in
+  // assertion builds after every flush and compaction (TODO 4.5).
+  [[nodiscard]] std::string CheckInvariants() const;
 };
 
 // What VersionSet::Recover found.
