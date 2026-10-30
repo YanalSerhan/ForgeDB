@@ -56,17 +56,29 @@ class SizeChecker final : public WriteBatch::Handler {
     if (status_.ok()) {
       status_ = CheckValueSize(value);
     }
+    bytes_ += key.size() + value.size();
   }
   void Delete(std::string_view key) override {
     if (status_.ok()) {
       status_ = CheckKeySize(key);
     }
+    bytes_ += key.size();
   }
   [[nodiscard]] const Status& status() const noexcept { return status_; }
+  // Keys plus values (DBStats::user_bytes).
+  [[nodiscard]] std::uint64_t Bytes() const noexcept { return bytes_; }
 
  private:
   Status status_;
+  std::uint64_t bytes_ = 0;
 };
+
+// Microseconds since `start`.
+std::uint64_t MicrosecondsSince(std::chrono::steady_clock::time_point start) {
+  return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                        std::chrono::steady_clock::now() - start)
+                                        .count());
+}
 
 // Group size cap: a leader adds followers' batches while the group stays
 // under 1 MiB, but only 128 KiB beyond its own batch when that is small, so
@@ -145,7 +157,9 @@ DBImpl::DBImpl(const Options& options, std::filesystem::path name,
                        ? std::make_unique<BlockCache>(options.block_cache_bytes)
                        : nullptr),
       table_cache_(std::make_unique<TableCache>(file_system_.get(), name_, options.max_open_tables,
-                                                block_cache_.get())) {}
+                                                block_cache_.get())) {
+  stats_.levels.resize(static_cast<std::size_t>(kNumLevels));
+}
 
 Status DBImpl::ReplayLog(std::uint64_t number, bool newest, MemTable& memtable,
                          SequenceNumber& last_sequence) {
@@ -427,6 +441,7 @@ Status DBImpl::Write(const WriteOptions& options, const WriteBatch& batch) {
   FORGEDB_RETURN_IF_ERROR(sizes.status());
 
   Writer self(&batch, options.sync);
+  self.user_bytes = sizes.Bytes();
   std::unique_lock lock(mutex_);
   writers_.push_back(&self);
   self.cv.wait(lock, [&] { return self.done || &self == writers_.front(); });
@@ -458,10 +473,12 @@ Status DBImpl::Write(const WriteOptions& options, const WriteBatch& batch) {
     // writers aren't blocked; we are still the only writer (queue front).
     lock.unlock();
     bool log_touched = false;
+    const std::uint64_t log_bytes_before = log_->BytesWritten();
     if (status.ok()) {
       log_touched = true;
       status = log_->AddRecord(WriteBatchInternal::Contents(group_batch_));
     }
+    const std::uint64_t log_bytes = log_->BytesWritten() - log_bytes_before;
     if (status.ok() && group.sync) {
       status = log_file_->Sync();
     }
@@ -471,6 +488,7 @@ Status DBImpl::Write(const WriteOptions& options, const WriteBatch& batch) {
     }
     lock.lock();
 
+    stats_.log_bytes += log_bytes;  // appended, whatever happened next
     if (status.ok()) {
       last_sequence_ = first + count - 1;  // publishes the whole group at once
       ++groups_written_;
@@ -487,6 +505,9 @@ Status DBImpl::Write(const WriteOptions& options, const WriteBatch& batch) {
   while (true) {
     Writer* const member = writers_.front();
     writers_.pop_front();
+    if (status.ok()) {
+      stats_.user_bytes += member->user_bytes;
+    }
     if (member != &self) {
       member->status = status;
       member->done = true;
@@ -538,7 +559,7 @@ std::uint64_t DBImpl::GroupsWrittenForTesting() {
 
 std::uint64_t DBImpl::FlushesForTesting() {
   const std::scoped_lock lock(mutex_);
-  return flushes_;
+  return stats_.flushes;
 }
 
 std::shared_ptr<const Version> DBImpl::CurrentVersion() {
@@ -548,12 +569,9 @@ std::shared_ptr<const Version> DBImpl::CurrentVersion() {
 
 namespace {
 
-void AddStall(DBImpl::StallCounter& counter, std::chrono::steady_clock::time_point start) {
-  ++counter.count;
-  counter.microseconds +=
-      static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
-                                     std::chrono::steady_clock::now() - start)
-                                     .count());
+void AddStall(StallStats& stall, std::chrono::steady_clock::time_point start) {
+  ++stall.count;
+  stall.microseconds += MicrosecondsSince(start);
 }
 
 }  // namespace
@@ -572,7 +590,7 @@ Status DBImpl::MakeRoomForWrite(std::unique_lock<std::mutex>& lock, bool force) 
       lock.unlock();
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
       lock.lock();
-      AddStall(stalls_.level0_slowdown, start);
+      AddStall(stats_.level0_slowdown, start);
       delayed = true;
       continue;
     }
@@ -585,9 +603,9 @@ Status DBImpl::MakeRoomForWrite(std::unique_lock<std::mutex>& lock, bool force) 
       // The last switch's flush is still running, or level 0 is full: wait
       // for the background thread.
       const auto start = std::chrono::steady_clock::now();
-      StallCounter& counter = imm_ ? stalls_.memtable_full : stalls_.level0_stop;
+      StallStats& stall = imm_ ? stats_.memtable_full : stats_.level0_stop;
       done_cv_.wait(lock);
-      AddStall(counter, start);
+      AddStall(stall, start);
       continue;
     }
     FORGEDB_RETURN_IF_ERROR(SwitchMemtable(lock));
@@ -693,14 +711,18 @@ void DBImpl::DoFlush(std::unique_lock<std::mutex>& lock) {
   pending_flush_.reset();
   flush_queued_.store(false);
 
+  const auto start = std::chrono::steady_clock::now();
   lock.unlock();
-  const Status status = RunFlush(job);
+  std::uint64_t bytes_written = 0;
+  const Status status = RunFlush(job, &bytes_written);
   lock.lock();
 
   if (status.ok()) {
     version_ = versions_->Current();
     imm_.Reset();
-    ++flushes_;
+    ++stats_.flushes;
+    stats_.flush_microseconds += MicrosecondsSince(start);
+    stats_.flush_bytes_written += bytes_written;
     // The old log is kept until the next MANIFEST record (ADR 0007); the
     // one the previous flush retired can go.
     if (const std::optional<std::uint64_t> obsolete = std::exchange(retired_log_, job.old_log)) {
@@ -713,9 +735,12 @@ void DBImpl::DoFlush(std::unique_lock<std::mutex>& lock) {
   done_cv_.notify_all();
 }
 
-Status DBImpl::RunFlush(const FlushJob& job) {
+Status DBImpl::RunFlush(const FlushJob& job, std::uint64_t* bytes_written) {
   VersionEdit edit;
   FORGEDB_RETURN_IF_ERROR(WriteLevel0Table(*job.memtable, edit));
+  for (const VersionEdit::AddedFile& added : edit.added_files) {
+    *bytes_written += added.file.file_size;
+  }
   // The new log is the first one recovery needs from now on.
   edit.log_number = job.new_log;
   edit.last_sequence = job.flushed_through;
@@ -733,13 +758,27 @@ void DBImpl::FlushDuringCompaction() {
 
 void DBImpl::DoCompaction(std::unique_lock<std::mutex>& lock, const Compaction& compaction,
                           bool manual) {
+  // Flushes run in the middle (FlushDuringCompaction) count as flush time,
+  // not compaction time.
+  const auto start = std::chrono::steady_clock::now();
+  const std::uint64_t flush_microseconds = stats_.flush_microseconds;
   lock.unlock();
   bool abandoned = false;
-  const Status status = RunCompaction(compaction, /*allow_trivial_move=*/!manual, &abandoned);
+  CompactionStats done;
+  const Status status =
+      RunCompaction(compaction, /*allow_trivial_move=*/!manual, &abandoned, &done);
   lock.lock();
   if (status.ok()) {
     version_ = versions_->Current();
-    ++compactions_;
+    const std::uint64_t elapsed = MicrosecondsSince(start);
+    const std::uint64_t flushing = stats_.flush_microseconds - flush_microseconds;
+    CompactionStats& level =
+        stats_.levels.at(static_cast<std::size_t>(compaction.level)).compactions;
+    level.count += done.count;
+    level.trivial_moves += done.trivial_moves;
+    level.microseconds += elapsed > flushing ? elapsed - flushing : 0;
+    level.bytes_read += done.bytes_read;
+    level.bytes_written += done.bytes_written;
   } else if (!abandoned) {
     background_error_ = status;  // writes stop; reads go on (see "Errors")
   }
@@ -865,8 +904,8 @@ Status MergeInputs(Iterator& input, DropRules& rules, CompactionOutputs& outputs
 
 }  // namespace
 
-Status DBImpl::RunCompaction(const Compaction& compaction, bool allow_trivial_move,
-                             bool* abandoned) {
+Status DBImpl::RunCompaction(const Compaction& compaction, bool allow_trivial_move, bool* abandoned,
+                             CompactionStats* stats) {
   const int output_level = compaction.level + 1;
   VersionEdit edit;
   for (int which = 0; which < 2; ++which) {
@@ -880,6 +919,7 @@ Status DBImpl::RunCompaction(const Compaction& compaction, bool allow_trivial_mo
     FORGEDB_RETURN_IF_ERROR(versions_->LogAndApply(edit));
     edit.removed_files.clear();  // the table is still in use
     RecordEdit(edit);
+    ++stats->trivial_moves;
     return Status::OK();
   }
 
@@ -928,6 +968,15 @@ Status DBImpl::RunCompaction(const Compaction& compaction, bool allow_trivial_mo
   // open deletes them if the edit is not there.
   FORGEDB_RETURN_IF_ERROR(versions_->LogAndApply(edit));
   RecordEdit(edit);
+  ++stats->count;
+  for (const std::vector<FileMetaData>& files : compaction.inputs) {
+    for (const FileMetaData& file : files) {
+      stats->bytes_read += file.file_size;
+    }
+  }
+  for (const VersionEdit::AddedFile& added : edit.added_files) {
+    stats->bytes_written += added.file.file_size;
+  }
   return Status::OK();
 }
 
@@ -970,9 +1019,17 @@ void DBImpl::DeleteObsoleteBackgroundFiles(std::unique_lock<std::mutex>& lock) {
 
 // --- Statistics and test hooks ----------------------------------------------------
 
-DBImpl::Stalls DBImpl::GetStalls() {
+DBStats DBImpl::GetStats() {
   const std::scoped_lock lock(mutex_);
-  return stalls_;
+  DBStats stats = stats_;
+  for (std::size_t level = 0; level < stats.levels.size(); ++level) {
+    const std::vector<FileMetaData>& files = version_->files.at(level);
+    stats.levels[level].tables = files.size();
+    for (const FileMetaData& file : files) {
+      stats.levels[level].bytes += file.file_size;
+    }
+  }
+  return stats;
 }
 
 std::optional<SequenceNumber> DBImpl::OldestSnapshotForTesting() const {
@@ -1009,7 +1066,11 @@ void DBImpl::SetCompactionsPausedForTesting(bool on) {
 
 std::uint64_t DBImpl::CompactionsForTesting() {
   const std::scoped_lock lock(mutex_);
-  return compactions_;
+  std::uint64_t compactions = 0;
+  for (const LevelStats& level : stats_.levels) {
+    compactions += level.compactions.count + level.compactions.trivial_moves;
+  }
+  return compactions;
 }
 
 Status DBImpl::FlushForTesting() {

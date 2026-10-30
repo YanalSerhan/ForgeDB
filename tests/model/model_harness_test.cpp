@@ -136,6 +136,7 @@ class DBThatIgnoresDeletesOf final : public DB {
     return real_->NewIterator(options);
   }
   std::shared_ptr<const Snapshot> GetSnapshot() override { return real_->GetSnapshot(); }
+  DBStats GetStats() override { return real_->GetStats(); }
 
  private:
   std::unique_ptr<DB> real_;
@@ -250,6 +251,7 @@ class DBThatIgnoresSnapshots final : public DB {
     return real_->NewIterator({});
   }
   std::shared_ptr<const Snapshot> GetSnapshot() override { return real_->GetSnapshot(); }
+  DBStats GetStats() override { return real_->GetStats(); }
 
  private:
   std::unique_ptr<DB> real_;

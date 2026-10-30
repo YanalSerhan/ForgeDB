@@ -24,6 +24,7 @@ add_executable(forgedb_unit_tests
   unit/crc32c_test.cpp
   unit/db_background_test.cpp
   unit/db_compaction_test.cpp
+  unit/db_stats_test.cpp
   unit/db_flush_test.cpp
   unit/db_recovery_test.cpp
   unit/db_snapshot_test.cpp

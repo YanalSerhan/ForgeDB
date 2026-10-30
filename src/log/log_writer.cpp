@@ -22,6 +22,7 @@ Status Writer::AddRecord(std::string_view record) {
       static constexpr std::array<char, kHeaderSize - 1> kZeros{};
       if (leftover > 0) {
         FORGEDB_RETURN_IF_ERROR(file_->Append(std::string_view(kZeros.data(), leftover)));
+        bytes_written_ += leftover;
       }
       block_offset_ = 0;
     }
@@ -61,7 +62,9 @@ Status Writer::EmitFragment(RecordType type, std::string_view payload) {
   header[6] = type_byte;
 
   FORGEDB_RETURN_IF_ERROR(file_->Append(std::string_view(header.data(), header.size())));
+  bytes_written_ += header.size();
   FORGEDB_RETURN_IF_ERROR(file_->Append(payload));
+  bytes_written_ += payload.size();
   block_offset_ += kHeaderSize + payload.size();
   return Status::OK();
 }

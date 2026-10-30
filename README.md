@@ -9,8 +9,8 @@ memtables are flushed to immutable, sorted table files with bloom filters, and a
 which files are live, so the database recovers to a consistent state after a crash. The core
 library has no third-party dependencies.
 
-**Status: Phase 4 in progress: snapshots, background flushes and leveled compaction are done;
-statistics and the long stress test are next.** Not for production use.
+**Status: Phase 4 in progress: snapshots, background flushes, leveled compaction and
+statistics are done; the long stress test is next.** Not for production use.
 See [TODO.md](TODO.md) for the plan.
 
 ```cpp
@@ -103,8 +103,12 @@ they are recorded in [TODO.md](TODO.md) with how they were measured.
 - **Checked against a model.** 3 seeds × 1,000,000 random operations, with reopens and about 80
   flushes per seed, agree with `std::map`; snapshot reads agree with copies of the map taken with
   each snapshot; a third run compacts through tiny levels so data reaches level 3.
+- **Statistics.** `DB::GetStats()`: bytes written by users and to the log, flushes and
+  compactions (count, bytes read and written, time, per level), write amplification, stalls, and
+  each level's size. Counted from the open, not saved; `forgedb_cli stats` prints them.
 - **Tools.** `forgedb_sst_dump` prints and checks a table file; `forgedb_cli` runs `put`, `get`,
-  `delete`, `scan` and `stats` (tables per level, and what recovery found) from the command line.
+  `delete`, `scan` and `stats` (tables per level, statistics, and what recovery found) from the
+  command line.
 
 ## Building on Windows
 
@@ -205,11 +209,12 @@ forgedb_cli <db-dir> put <key> <value>     synced; creates the database if neede
 forgedb_cli <db-dir> get <key>             exit code 1 if not found
 forgedb_cli <db-dir> delete <key>
 forgedb_cli <db-dir> scan [--from <key>] [--limit <n>]
-forgedb_cli <db-dir> stats                 tables per level, last sequence, recovery report
+forgedb_cli <db-dir> stats                 tables per level, last sequence, statistics, recovery
 ```
 
 Every `forgedb_cli` command opens the database and so runs recovery: writes left in the log
-become a level-0 table. Output is UTF-8; `scan` escapes bytes that are not printable ASCII.
+become a level-0 table. The statistics `stats` prints count from that open, so they show what the
+command's own open did (a compaction it set off, for example; not the recovery table). Output is UTF-8; `scan` escapes bytes that are not printable ASCII.
 
 ## Known limitations
 

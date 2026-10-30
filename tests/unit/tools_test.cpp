@@ -273,6 +273,13 @@ TEST_F(CliTest, StatsShowsTablesAndRecovery) {
   EXPECT_TRUE(Has(out, "tables: 2\n"));
   EXPECT_TRUE(Has(out, "level 0: 2 tables, "));
   EXPECT_TRUE(Has(out, "'k2' @ 2 put .. 'k2' @ 2 put\n"));
+  // This open wrote nothing (its recovery table is not counted), and two
+  // level-0 tables are below the compaction trigger.
+  EXPECT_TRUE(Has(out, "since this open:\n  user writes: 0 bytes (log: 0 bytes)\n"));
+  EXPECT_TRUE(Has(out, "  flushes: 0 (0 bytes written, 0.000 ms)\n"));
+  EXPECT_TRUE(Has(out, "  compactions: none\n"));
+  EXPECT_TRUE(Has(out, "  write amplification: n/a, no writes (0 table bytes written)\n"));
+  EXPECT_TRUE(Has(out, "  stalls: memtable full 0 (0.000 ms), "));
   EXPECT_TRUE(Has(out, "recovery (when this command opened the database):\n"));
   EXPECT_TRUE(Has(out, "  MANIFEST read: MANIFEST-"));
   EXPECT_TRUE(Has(out, "(1 record)\n")) << "k2's log was replayed";

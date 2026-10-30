@@ -43,7 +43,7 @@
 //
 // Write stalls (Phase 4.3)
 //   A writer waits when the memtable is full while the last flush still runs
-//   (stalls_.memtable_full). With level0_slowdown_writes_trigger level-0
+//   (stats_.memtable_full). With level0_slowdown_writes_trigger level-0
 //   tables or more, each write first sleeps 1 ms, once, so compaction can
 //   catch up; with level0_stop_writes_trigger or more, a writer that needs a
 //   new memtable waits for a compaction to make room.
@@ -70,6 +70,13 @@
 //   writer waiting for the background thread, which stops working. Reads go
 //   on. Nothing is lost: a log is deleted only after the MANIFEST records its
 //   contents, and a table only after the MANIFEST no longer lists it.
+//
+// Statistics (Phase 4.4)
+//   stats_ (forgedb/stats.h), guarded by mutex_, counts from the open on: the
+//   leader adds a group's user and log bytes when it hands out the statuses;
+//   the background thread adds a flush or compaction when it has finished;
+//   stalls are added when they end. GetStats copies it and the current
+//   Version's level sizes under the lock.
 //
 // Snapshots (Phase 4.1)
 //   A snapshot is a sequence number registered in snapshots_; a read with
@@ -165,23 +172,12 @@ class DBImpl final : public DB {
   [[nodiscard]] Result<std::string> Get(const ReadOptions& options, std::string_view key) override;
   [[nodiscard]] std::unique_ptr<Iterator> NewIterator(const ReadOptions& options) override;
   [[nodiscard]] std::shared_ptr<const Snapshot> GetSnapshot() override;
+  [[nodiscard]] DBStats GetStats() override;
 
   // For tools (forgedb_cli stats) and tests.
   [[nodiscard]] SequenceNumber LastSequence();
   [[nodiscard]] std::shared_ptr<const Version> CurrentVersion();
   [[nodiscard]] const RecoveryInfo& GetRecoveryInfo() const noexcept { return recovery_; }
-
-  // Times writes were held up, and for how long in total.
-  struct StallCounter {
-    std::uint64_t count = 0;
-    std::uint64_t microseconds = 0;
-  };
-  struct Stalls {
-    StallCounter memtable_full;    // the memtable was full while the last flush still ran
-    StallCounter level0_slowdown;  // 1 ms delays: level 0 at the slowdown trigger
-    StallCounter level0_stop;      // waits: level 0 at the stop trigger
-  };
-  [[nodiscard]] Stalls GetStalls();
 
   // For tests.
   [[nodiscard]] std::uint64_t GroupsWrittenForTesting();
@@ -220,9 +216,10 @@ class DBImpl final : public DB {
         : batch(writer_batch), sync(writer_sync) {}
     const WriteBatch* batch;
     bool sync;
-    bool force_flush = false;  // FlushForTesting: switch memtables, write nothing
-    bool done = false;         // set by the leader that wrote this writer's batch
-    Status status;             // valid once done
+    bool force_flush = false;      // FlushForTesting: switch memtables, write nothing
+    std::uint64_t user_bytes = 0;  // keys + values of the batch (DBStats::user_bytes)
+    bool done = false;             // set by the leader that wrote this writer's batch
+    Status status;                 // valid once done
     std::condition_variable cv;
   };
 
@@ -268,12 +265,14 @@ class DBImpl final : public DB {
   [[nodiscard]] bool HasBackgroundWork() const;  // mutex_ held
   [[nodiscard]] bool BackgroundIdle() const;     // mutex_ held
   void DoFlush(std::unique_lock<std::mutex>& lock);
-  [[nodiscard]] Status RunFlush(const FlushJob& job);  // mutex_ not held
+  // mutex_ not held. Sets *bytes_written to the new table's size.
+  [[nodiscard]] Status RunFlush(const FlushJob& job, std::uint64_t* bytes_written);
   void DoCompaction(std::unique_lock<std::mutex>& lock, const Compaction& compaction, bool manual);
   // Runs a compaction (mutex_ not held): writes its outputs and records them
-  // in the MANIFEST. Sets *abandoned if it stopped for shutdown.
+  // in the MANIFEST. Sets *abandoned if it stopped for shutdown. On success,
+  // adds what it did to *stats (all but the time).
   [[nodiscard]] Status RunCompaction(const Compaction& compaction, bool allow_trivial_move,
-                                     bool* abandoned);
+                                     bool* abandoned, CompactionStats* stats);
   // Called by a running compaction now and then: runs a queued flush.
   void FlushDuringCompaction();
   // After every MANIFEST record: tables removed by the record before become
@@ -316,16 +315,15 @@ class DBImpl final : public DB {
   std::shared_ptr<const Version> version_;  // guarded by mutex_
   SequenceNumber last_sequence_ = 0;        // guarded by mutex_
   std::uint64_t groups_written_ = 0;        // guarded by mutex_
-  std::uint64_t flushes_ = 0;               // guarded by mutex_
-  std::uint64_t compactions_ = 0;           // guarded by mutex_
-  Stalls stalls_;                           // guarded by mutex_
-  std::optional<FlushJob> pending_flush_;   // guarded by mutex_; for the background thread
-  bool shutting_down_ = false;              // guarded by mutex_
-  bool synchronous_flush_ = false;          // guarded by mutex_
-  bool busy_ = false;                       // guarded by mutex_; a background job is running
-  bool compactions_paused_ = false;         // guarded by mutex_
-  std::optional<int> manual_level_;         // guarded by mutex_; CompactLevelForTesting
-  std::uint64_t manual_done_ = 0;           // guarded by mutex_; manual compactions finished
+  // Since the open; levels[i].compactions only (see "Statistics").
+  DBStats stats_;                          // guarded by mutex_
+  std::optional<FlushJob> pending_flush_;  // guarded by mutex_; for the background thread
+  bool shutting_down_ = false;             // guarded by mutex_
+  bool synchronous_flush_ = false;         // guarded by mutex_
+  bool busy_ = false;                      // guarded by mutex_; a background job is running
+  bool compactions_paused_ = false;        // guarded by mutex_
+  std::optional<int> manual_level_;        // guarded by mutex_; CompactLevelForTesting
+  std::uint64_t manual_done_ = 0;          // guarded by mutex_; manual compactions finished
   // The log the last flush retired, kept until the next MANIFEST record.
   std::optional<std::uint64_t> retired_log_;  // guarded by mutex_
   std::condition_variable work_cv_;           // wakes the background thread

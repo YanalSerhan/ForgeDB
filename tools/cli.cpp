@@ -3,10 +3,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <iomanip>
+#include <ios>
 #include <memory>
 #include <optional>
 #include <ostream>
 #include <span>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -16,6 +19,7 @@
 #include "forgedb/iterator.h"
 #include "forgedb/options.h"
 #include "forgedb/result.h"
+#include "forgedb/stats.h"
 #include "forgedb/status.h"
 
 #include "db/db_impl.h"
@@ -133,6 +137,18 @@ void PrintRecovery(const RecoveryInfo& info, std::ostream& out) {
   out << '\n';
 }
 
+// "12.345 ms".
+std::string Milliseconds(std::uint64_t microseconds) {
+  std::ostringstream text;
+  text << microseconds / 1000 << '.' << std::setw(3) << std::setfill('0') << microseconds % 1000
+       << " ms";
+  return text.str();
+}
+
+std::string Stall(const StallStats& stall) {
+  return std::to_string(stall.count) + " (" + Milliseconds(stall.microseconds) + ")";
+}
+
 void Stats(DBImpl& db, std::ostream& out) {
   const std::shared_ptr<const Version> version = db.CurrentVersion();
   out << "last sequence number: " << db.LastSequence() << '\n';
@@ -152,10 +168,42 @@ void Stats(DBImpl& db, std::ostream& out) {
           << FormatInternalKey(file.smallest) << " .. " << FormatInternalKey(file.largest) << '\n';
     }
   }
+  PrintActivity(db.GetStats(), out);
   PrintRecovery(db.GetRecoveryInfo(), out);
 }
 
 }  // namespace
+
+void PrintActivity(const DBStats& stats, std::ostream& out) {
+  out << "since this open:\n";
+  out << "  user writes: " << stats.user_bytes << " bytes (log: " << stats.log_bytes << " bytes)\n";
+  out << "  flushes: " << stats.flushes << " (" << stats.flush_bytes_written << " bytes written, "
+      << Milliseconds(stats.flush_microseconds) << ")\n";
+  bool any_compaction = false;
+  for (std::size_t level = 0; level < stats.levels.size(); ++level) {
+    const CompactionStats& compactions = stats.levels[level].compactions;
+    if (compactions.count == 0 && compactions.trivial_moves == 0) {
+      continue;
+    }
+    any_compaction = true;
+    out << "  compactions level " << level << " -> " << level + 1 << ": " << compactions.count
+        << " (+" << Count(compactions.trivial_moves, "trivial move") << "), read "
+        << compactions.bytes_read << " bytes, wrote " << compactions.bytes_written << " bytes, "
+        << Milliseconds(compactions.microseconds) << '\n';
+  }
+  if (!any_compaction) {
+    out << "  compactions: none\n";
+  }
+  out << "  write amplification: ";
+  if (const std::optional<double> amplification = stats.WriteAmplification()) {
+    out << std::fixed << std::setprecision(2) << *amplification << std::defaultfloat << " ("
+        << stats.TableBytesWritten() << " table bytes / " << stats.user_bytes << " user bytes)\n";
+  } else {
+    out << "n/a, no writes (" << stats.TableBytesWritten() << " table bytes written)\n";
+  }
+  out << "  stalls: memtable full " << Stall(stats.memtable_full) << ", level-0 slowdown "
+      << Stall(stats.level0_slowdown) << ", level-0 stop " << Stall(stats.level0_stop) << '\n';
+}
 
 int RunCli(std::span<const std::string> args, std::shared_ptr<FileSystem> fs, std::ostream& out,
            std::ostream& err) {

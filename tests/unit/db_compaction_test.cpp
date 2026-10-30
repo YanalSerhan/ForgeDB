@@ -569,14 +569,14 @@ TEST_F(CompactionTest, WritesSlowDownThenStopWhileLevelZeroIsFull) {
   writer.WaitUntilStuck();
   ASSERT_LT(writer.Written(), 2000) << "it cannot finish while compactions are paused";
   EXPECT_EQ(Impl(*db).CurrentVersion()->files[0].size(), 4U) << "the stop trigger";
-  EXPECT_GT(Impl(*db).GetStalls().level0_slowdown.count, 0U) << "delayed from 3 tables on";
-  EXPECT_EQ(Impl(*db).GetStalls().level0_stop.count, 0U) << "still waiting: counted when it ends";
+  EXPECT_GT(Impl(*db).GetStats().level0_slowdown.count, 0U) << "delayed from 3 tables on";
+  EXPECT_EQ(Impl(*db).GetStats().level0_stop.count, 0U) << "still waiting: counted when it ends";
 
   Impl(*db).SetCompactionsPausedForTesting(false);
   writer.Join();
   EXPECT_FALSE(writer.Failed());
   EXPECT_EQ(writer.Written(), 2000);
-  EXPECT_GE(Impl(*db).GetStalls().level0_stop.count, 1U);
+  EXPECT_GE(Impl(*db).GetStats().level0_stop.count, 1U);
   EXPECT_GT(Impl(*db).CompactionsForTesting(), 0U);
   for (int i = 0; i < 2000; i += 97) {
     ASSERT_EQ(Get(*db, Key(i)), std::string(200, 'w')) << i;

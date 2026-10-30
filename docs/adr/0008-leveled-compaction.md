@@ -59,7 +59,7 @@ LevelDB's design ([impl.md](https://github.com/google/leveldb/blob/main/doc/impl
 6. **Write stalls.** With `level0_slowdown_writes_trigger` (8) level-0 tables or more, each write
    sleeps 1 ms once, without the mutex; with `level0_stop_writes_trigger` (12) or more, a write
    that needs a new memtable waits for a compaction. Open checks 1 ≤ compaction trigger ≤
-   slowdown ≤ stop. Stalls are counted (`DBImpl::GetStalls`).
+   slowdown ≤ stop. Stalls are counted (`DB::GetStats`, since Phase 4.4).
 7. **Errors and shutdown.** A failed compaction becomes the sticky background error (writes
    stop, reads go on, a reopen recovers). It removes its outputs only if it failed before writing
    its MANIFEST edit: if appending or syncing the edit fails, the edit may still be in the file and

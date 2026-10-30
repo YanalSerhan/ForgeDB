@@ -30,6 +30,7 @@
 #include "forgedb/options.h"
 #include "forgedb/result.h"
 #include "forgedb/snapshot.h"
+#include "forgedb/stats.h"
 #include "forgedb/status.h"
 #include "forgedb/write_batch.h"
 
@@ -84,6 +85,11 @@ class DB {
   // The database as it is now, to read later with ReadOptions::snapshot (see
   // forgedb/snapshot.h). Cheap: it records a sequence number.
   [[nodiscard]] virtual std::shared_ptr<const Snapshot> GetSnapshot() = 0;
+
+  // What this open has done: bytes written by users, flushes and
+  // compactions, write amplification, stalls, and the size of each level
+  // now (see forgedb/stats.h).
+  [[nodiscard]] virtual DBStats GetStats() = 0;
 };
 
 }  // namespace forgedb

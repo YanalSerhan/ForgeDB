@@ -45,7 +45,10 @@ class LogTest : public testing::Test {
       EXPECT_TRUE(writer.AddRecord(record).ok());
     }
     EXPECT_TRUE(file->Close().ok());
-    return FileContents("log");
+    std::string contents = FileContents("log");
+    // Counted exactly, padding and headers included (DBStats::log_bytes).
+    EXPECT_EQ(writer.BytesWritten(), contents.size());
+    return contents;
   }
 
   // Reads every record from a log consisting of `bytes`.

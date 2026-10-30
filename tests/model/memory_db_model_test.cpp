@@ -18,9 +18,18 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #include "forgedb/db.h"
+#include "forgedb/iterator.h"
+#include "forgedb/options.h"
+#include "forgedb/result.h"
+#include "forgedb/snapshot.h"
+#include "forgedb/stats.h"
+#include "forgedb/status.h"
+#include "forgedb/write_batch.h"
 
 #include "db/db_impl.h"
 #include "db/version_set.h"
@@ -47,6 +56,60 @@ std::vector<std::uint64_t> Seeds() {
 }
 
 class MemoryDBModelTest : public testing::TestWithParam<std::uint64_t> {};
+
+// Statistics summed over every open of a run (DB::GetStats counts one open).
+struct RunTotals {
+  std::uint64_t opens = 0;
+  std::uint64_t user_bytes = 0;
+  std::uint64_t table_bytes = 0;  // written by flushes and compactions
+  std::uint64_t flushes = 0;
+  std::uint64_t compactions = 0;  // trivial moves included
+};
+
+// Forwards everything to a real DB, and adds its statistics to `totals`
+// when it is closed.
+class TotallingDB final : public DB {
+ public:
+  TotallingDB(std::unique_ptr<DB> real, std::shared_ptr<RunTotals> totals)
+      : real_(std::move(real)), totals_(std::move(totals)) {}
+  ~TotallingDB() override {
+    const DBStats stats = real_->GetStats();
+    ++totals_->opens;
+    totals_->user_bytes += stats.user_bytes;
+    totals_->table_bytes += stats.TableBytesWritten();
+    totals_->flushes += stats.flushes;
+    for (const LevelStats& level : stats.levels) {
+      totals_->compactions += level.compactions.count + level.compactions.trivial_moves;
+    }
+  }
+  TotallingDB(const TotallingDB&) = delete;
+  TotallingDB& operator=(const TotallingDB&) = delete;
+  TotallingDB(TotallingDB&&) = delete;
+  TotallingDB& operator=(TotallingDB&&) = delete;
+
+  Status Write(const WriteOptions& options, const WriteBatch& batch) override {
+    return real_->Write(options, batch);
+  }
+  Result<std::string> Get(const ReadOptions& options, std::string_view key) override {
+    return real_->Get(options, key);
+  }
+  std::unique_ptr<Iterator> NewIterator(const ReadOptions& options) override {
+    return real_->NewIterator(options);
+  }
+  std::shared_ptr<const Snapshot> GetSnapshot() override { return real_->GetSnapshot(); }
+  DBStats GetStats() override { return real_->GetStats(); }
+
+ private:
+  std::unique_ptr<DB> real_;
+  std::shared_ptr<RunTotals> totals_;
+};
+
+Result<std::unique_ptr<DB>> OpenTotalling(const Options& options,
+                                          const std::shared_ptr<MemFileSystem>& fs,
+                                          const std::shared_ptr<RunTotals>& totals) {
+  FORGEDB_ASSIGN_OR_RETURN(std::unique_ptr<DB> real, OpenDB(options, "model-test", fs));
+  return std::unique_ptr<DB>(std::make_unique<TotallingDB>(std::move(real), totals));
+}
 
 TEST_P(MemoryDBModelTest, AgreesWithStdMap) {
   // Each run (and each replay while shrinking) starts on a new in-memory file
@@ -124,12 +187,14 @@ TEST_P(MemoryDBModelTest, AgreesWithStdMapAcrossCompactions) {
   db_options.target_file_size = db_options.memtable_bytes / 4;
   db_options.block_size = 1024;
   const auto storage = std::make_shared<std::shared_ptr<MemFileSystem>>();
+  const auto totals = std::make_shared<RunTotals>();
   const DbSetup setup(
-      [storage, db_options] {
+      [storage, totals, db_options] {
         *storage = std::make_shared<MemFileSystem>();
-        return OpenDB(db_options, "model-test", *storage);
+        *totals = RunTotals{};  // a new run (or a replay while shrinking)
+        return OpenTotalling(db_options, *storage, totals);
       },
-      [storage, db_options] { return OpenDB(db_options, "model-test", *storage); });
+      [storage, totals, db_options] { return OpenTotalling(db_options, *storage, totals); });
   RunOptions options;
   options.seed = GetParam();
   options.operations = OperationsPerSeed();
@@ -137,6 +202,21 @@ TEST_P(MemoryDBModelTest, AgreesWithStdMapAcrossCompactions) {
   options.generator.snapshot_slots = 4;
   options.generator.expected_snapshots = 200;
   EXPECT_EQ(RunModelTest(setup, options), "");
+
+  // Measured, not checked: with these tiny levels it says little about real
+  // settings. Tables written at reopen by recovery are not counted.
+  EXPECT_GT(totals->user_bytes, 0U);
+  std::printf(  // NOLINT(*-vararg)
+      "[ model    ] seed %llu: write amplification %.2f (%llu table bytes / %llu user bytes; "
+      "%llu flushes, %llu compactions, %llu opens)\n",
+      static_cast<unsigned long long>(GetParam()),
+      static_cast<double>(totals->table_bytes) /
+          static_cast<double>(std::max<std::uint64_t>(totals->user_bytes, 1)),
+      static_cast<unsigned long long>(totals->table_bytes),
+      static_cast<unsigned long long>(totals->user_bytes),
+      static_cast<unsigned long long>(totals->flushes),
+      static_cast<unsigned long long>(totals->compactions),
+      static_cast<unsigned long long>(totals->opens));
 
   // The data really went deep: open the storage once more and look.
   const Result<std::unique_ptr<DB>> db = OpenDB(db_options, "model-test", *storage);

@@ -12,6 +12,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string_view>
 
 #include "forgedb/status.h"
@@ -31,11 +32,15 @@ class Writer {
   // further writes (WritableFile errors are sticky), so the log is finished.
   [[nodiscard]] Status AddRecord(std::string_view record);
 
+  // Bytes appended to the file so far (headers and block padding included).
+  [[nodiscard]] std::uint64_t BytesWritten() const noexcept { return bytes_written_; }
+
  private:
   [[nodiscard]] Status EmitFragment(RecordType type, std::string_view payload);
 
   WritableFile* file_;
-  std::size_t block_offset_ = 0;  // bytes already used in the current block
+  std::size_t block_offset_ = 0;     // bytes already used in the current block
+  std::uint64_t bytes_written_ = 0;  // appended successfully
 };
 
 }  // namespace forgedb::log

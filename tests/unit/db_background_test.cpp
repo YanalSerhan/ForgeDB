@@ -139,7 +139,7 @@ class BackgroundTest : public testing::Test {
 TEST_F(BackgroundTest, WritesGoOnWhileAFlushRunsAndWaitOnlyWhenTheMemtableFillsAgain) {
   const std::unique_ptr<DB> db = Open();
   WriteUntilAFlushIsHeld(*db);
-  EXPECT_EQ(Impl(*db).GetStalls().memtable_full.count, 0U);
+  EXPECT_EQ(Impl(*db).GetStats().memtable_full.count, 0U);
 
   // A writer fills the new memtable, then has to wait for the held flush.
   Writer writer(db.get(), next_, 500);
@@ -154,7 +154,7 @@ TEST_F(BackgroundTest, WritesGoOnWhileAFlushRunsAndWaitOnlyWhenTheMemtableFillsA
   writer.Join();
   ASSERT_TRUE(writer.Failure().ok()) << writer.Failure().ToString();
   next_ += 500;
-  EXPECT_GE(Impl(*db).GetStalls().memtable_full.count, 1U);
+  EXPECT_GE(Impl(*db).GetStats().memtable_full.count, 1U);
   Impl(*db).WaitForFlushForTesting();
   EXPECT_GE(Impl(*db).FlushesForTesting(), 2U);
   for (int i = 0; i < next_; ++i) {
@@ -220,7 +220,7 @@ TEST_F(BackgroundTest, SynchronousFlushHookWaitsForTheFlush) {
     ASSERT_EQ(Impl(*db).FlushesForTesting(), flushes) << i;
   }
   EXPECT_GE(flushes, 3U);
-  EXPECT_EQ(Impl(*db).GetStalls().memtable_full.count, 0U);
+  EXPECT_EQ(Impl(*db).GetStats().memtable_full.count, 0U);
 }
 
 }  // namespace
