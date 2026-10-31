@@ -95,6 +95,10 @@ they are recorded in [TODO.md](TODO.md) with how they were measured.
 - **Real process kills.** 500 runs killing a writer with `TerminateProcess`: 100,218 acknowledged
   keys checked, none lost.
 - **Group commit.** Synced writes: 1.93 k/s with 1 thread, 8.86 k/s with 8 threads.
+- **Write amplification.** 1,000,000 random 16-byte keys with 100-byte values, default options,
+  unsynced: 5.26–5.37 bytes written to tables per byte written by the user once compaction has
+  settled (5.08–5.18 when the last write returns), at 137–142 k writes/s with no stalls (3 runs;
+  `BM_FillRandomWriteAmplification`).
 - **Bloom filters.** 10 bits per key: 0.817% false positives at 100,000 keys (Linux; 0.82%
   predicted). A `Get` for a missing key read a data block 845 times in 100,000.
 - **Corruption detection.** Every log fragment, table block and footer has a CRC-32C. The
