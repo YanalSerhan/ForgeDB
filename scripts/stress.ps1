@@ -36,9 +36,10 @@ $logDir = Join-Path $repoRoot 'out\logs'
 $exe = Join-Path $repoRoot "out\build\$Preset\tests\forgedb_stress_tests.exe"
 
 # Native tools run through cmd.exe so their stderr never turns into PowerShell errors.
-function Invoke-Logged([string] $CommandLine, [string] $Log) {
+# -Append adds to the log instead of replacing it (the build log has two steps).
+function Invoke-Logged([string] $CommandLine, [string] $Log, [switch] $Append) {
     Write-Host "==> $CommandLine" -ForegroundColor Cyan
-    cmd.exe /c "$CommandLine 2>&1" | Tee-Object -FilePath $Log | Out-Host
+    cmd.exe /c "$CommandLine 2>&1" | Tee-Object -FilePath $Log -Append:$Append | Out-Host
     return $LASTEXITCODE
 }
 
@@ -53,8 +54,9 @@ try {
     $null = Resolve-VcpkgRoot $VcpkgRoot
 
     $buildLog = Join-Path $logDir 'stress-build.log'
+    Remove-Item $buildLog -ErrorAction SilentlyContinue
     foreach ($step in @("cmake --preset $Preset", "cmake --build --preset $Preset --target forgedb_stress_tests")) {
-        if ((Invoke-Logged $step $buildLog) -ne 0) {
+        if ((Invoke-Logged $step $buildLog -Append) -ne 0) {
             throw "Failed: $step (see out\logs\stress-build.log)"
         }
     }

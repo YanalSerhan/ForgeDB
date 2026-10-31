@@ -332,9 +332,9 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - [ ] ADR: concurrency model without TSan (single writer, immutable files, pinned versions)
 
 ### ✅ Exit gate — Phase 4
-- [ ] Stress test runs 10 minutes clean, three times in a row
-- [ ] Crash torture passes 10,000 iterations with compaction enabled
-- [ ] Write amplification reported for a 1-million-key random-write workload
+- [x] Stress test runs 10 minutes clean, three times in a row (2026-10-30, commit f176cf9, `scripts\stress.ps1` in msvc-asan with assertions, real files: 3 × 618 s, seeds 14000208118381657317, 2356472407621798825, 11495261669295685729; 534–562 writes/s of 4-key batches, 215–227 Gets/s, 85–91 scans/s, 129–137 snapshot reads/s, 491–534 held-snapshot checks, 4,859–5,032 compactions and 6 opens per run)
+- [x] Crash torture passes 10,000 iterations with compaction enabled (2026-10-30, msvc-release, `FORGEDB_CRASH_CYCLES=10000`: all 11 variants passed, 3 seeds each, so 30,000 cycles per variant and 330,000 in all; every variant compacted, 6,428 to 77,108 compactions each, including the two that crash during compactions)
+- [ ] Write amplification reported for a 1-million-key random-write workload (benchmark: `BM_FillRandomWriteAmplification` in `forgedb_microbench`, `bench/db_fill_bench.cpp`: 1,000,000 distinct random 16-byte keys, 100-byte values, unsynced, default `Options`, real files; write amplification when the writes end and after compaction settles, 3 repetitions. Awaiting the Windows run)
 
 ---
 
