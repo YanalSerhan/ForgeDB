@@ -216,6 +216,12 @@ forgedb_cli <db-dir> get <key>             exit code 1 if not found
 forgedb_cli <db-dir> delete <key>
 forgedb_cli <db-dir> scan [--from <key>] [--limit <n>]
 forgedb_cli <db-dir> stats                 tables per level, last sequence, statistics, recovery
+
+forgedb_bench [--workloads=...] [--num=1000000] [--value_size=100] [--sync=1] [--threads=N]
+              [--runs=5] [--json=results.json] ...
+    fillseq, fillrandom, overwrite, readrandom, readmissing, readseq, seekrandom, mixed:
+    ops/s, MB/s, latency p50/p99/max, write and space amplification; reads check their
+    answers. Only meaningful from msvc-release (tools/bench/bench_options.h lists every option).
 ```
 
 Every `forgedb_cli` command opens the database and so runs recovery: writes left in the log

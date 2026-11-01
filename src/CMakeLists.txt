@@ -23,6 +23,7 @@ add_library(forgedb STATIC
   db/write_batch.cpp
   env/mem_file_system.cpp
   env/win_file_system.cpp
+  env/win_process_io.cpp
   env/win_util.cpp
   log/log_reader.cpp
   log/log_writer.cpp

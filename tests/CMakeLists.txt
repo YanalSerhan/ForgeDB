@@ -17,6 +17,7 @@ forgedb_target_defaults(forgedb_test_support)
 # have their own executables below.
 add_executable(forgedb_unit_tests
   unit/arena_test.cpp
+  unit/bench_test.cpp
   unit/block_test.cpp
   unit/bloom_filter_test.cpp
   unit/check_test.cpp
@@ -162,6 +163,13 @@ target_compile_definitions(forgedb_stress_tests PRIVATE
   FORGEDB_STRESS_TEST_SECONDS=${forgedb_stress_seconds})
 forgedb_target_defaults(forgedb_stress_tests)
 gtest_discover_tests(forgedb_stress_tests DISCOVERY_MODE PRE_TEST)
+
+# forgedb_bench smoke run (TODO 5.1): every workload, 2,000 keys, 2 threads,
+# on real files in %TEMP%. Checks that the tool runs and its reads give the
+# right answers (exit code 0); the numbers mean nothing at this size.
+add_test(NAME ForgeDBBench.EveryWorkloadOnRealFiles
+  COMMAND forgedb_bench --num=2000 --threads=2
+          "--json=${CMAKE_CURRENT_BINARY_DIR}/forgedb_bench_smoke.json")
 
 # Thread-safety canary (clang-cl only; ADR 0009): a file that touches a
 # FORGEDB_GUARDED_BY member without its mutex. The test passes only if the

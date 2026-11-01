@@ -343,11 +343,12 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 ## Phase 5 — Benchmarks and tuning (≈1–2 weeks)
 
 ### 5.1 Benchmark tool
-- [ ] `tools/forgedb_bench`: workloads `fillseq`, `fillrandom`, `overwrite`, `readrandom`, `readmissing`, `readseq`, `seekrandom` + scan, `mixed 90/10`
-- [ ] Options: key count, key size (16 B), value size (100 B, 1 KB), `sync` on/off, threads, cache size
-- [ ] Reports ops/sec, p50 and p99 latency, MB/s, write and space amplification; output as JSON
-- [ ] Engine adapters behind one interface: ForgeDB, RocksDB, LevelDB (from vcpkg `bench` feature), SQLite (`WITHOUT ROWID` key-value table, WAL journal mode, `synchronous` matched to the sync setting)
-- [ ] Same options for every engine; options printed with every result
+*Design approved (5.1a: the tool with ForgeDB; 5.1b: the other engines). Code: `tools/bench/`.*
+- [x] `tools/forgedb_bench`: workloads `fillseq`, `fillrandom`, `overwrite`, `readrandom`, `readmissing`, `readseq`, `seekrandom` + scan, `mixed 90/10` (`fillrandom` writes each of the N keys once, in shuffled order; keys are 2i, missing keys 2i + 1 between them; every workload but the fills first fills a database (not measured) and waits for its compactions; every read checks its answer, so a wrong result fails the run: `BenchRunTest.AWrongAnswerFailsTheRun`)
+- [x] Options: key count, key size (16 B), value size (100 B, 1 KB), `sync` on/off, threads, cache size (`--name=value`, as in db_bench; also `--runs`, `--seed`, `--db`, `--json`)
+- [x] Reports ops/sec, p50 and p99 latency, MB/s, write and space amplification; output as JSON (latency from a log-linear histogram, at most 6.25% high; write amplification from the process's I/O counters, `src/env/process_io.h`, from the start of the workload until compactions settle, log included; null where the counters do not work, e.g. under Wine; space amplification = database files ÷ live keys and values; each engine's own counters too, for ForgeDB its DBStats; a ctest smoke run, `ForgeDBBench.EveryWorkloadOnRealFiles`)
+- [ ] Engine adapters behind one interface: ForgeDB, RocksDB, LevelDB (from vcpkg `bench` feature), SQLite (`WITHOUT ROWID` key-value table, WAL journal mode, `synchronous` matched to the sync setting) (the interface and ForgeDB: `tools/bench/engine.h`, `forgedb_engine.*`; the others are 5.1b)
+- [ ] Same options for every engine; options printed with every result (printed with every result: done; the same options for every engine: with 5.1b)
 
 ### 5.2 Methodology
 - [ ] Exclude the benchmark folder from Windows Defender real-time scanning; note it in `docs/benchmarks.md`

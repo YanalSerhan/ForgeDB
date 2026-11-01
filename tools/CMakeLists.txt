@@ -4,8 +4,14 @@
 #
 #   forgedb_sst_dump   prints and checks a table file (tools/sst_dump.h)
 #   forgedb_cli        put, get, delete, scan, stats (tools/cli.h)
+#   forgedb_bench      workloads, throughput, latency, amplification (tools/bench/bench.h)
 
 add_library(forgedb_tools STATIC
+  bench/bench.cpp
+  bench/bench_options.cpp
+  bench/forgedb_engine.cpp
+  bench/histogram.cpp
+  bench/json_writer.cpp
   cli.cpp
   sst_dump.cpp
   tool_util.cpp
@@ -21,3 +27,7 @@ foreach(tool IN ITEMS sst_dump cli)
   target_link_libraries(forgedb_${tool} PRIVATE forgedb_tools)
   forgedb_target_defaults(forgedb_${tool})
 endforeach()
+
+add_executable(forgedb_bench bench/bench_main.cpp)
+target_link_libraries(forgedb_bench PRIVATE forgedb_tools)
+forgedb_target_defaults(forgedb_bench)
