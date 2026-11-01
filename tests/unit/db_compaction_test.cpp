@@ -709,6 +709,115 @@ TEST(CompactionErrorTest, AFailedManifestSyncKeepsTheOutputs) {
   }
 }
 
+// Holds every table removal at a gate; everything else is forwarded.
+class RemovalGateFileSystem final : public FileSystem {
+ public:
+  RemovalGateFileSystem(std::shared_ptr<FileSystem> base, Gate* gate)
+      : base_(std::move(base)), gate_(gate) {}
+  Status RemoveFile(const std::filesystem::path& path) override {
+    if (path.extension() == ".sst") {
+      FORGEDB_RETURN_IF_ERROR(gate_->Pass());
+    }
+    return base_->RemoveFile(path);
+  }
+  Result<std::unique_ptr<WritableFile>> NewWritableFile(
+      const std::filesystem::path& path) override {
+    return base_->NewWritableFile(path);
+  }
+  Result<std::unique_ptr<SequentialFile>> NewSequentialFile(
+      const std::filesystem::path& path) override {
+    return base_->NewSequentialFile(path);
+  }
+  Result<std::unique_ptr<RandomAccessFile>> NewRandomAccessFile(
+      const std::filesystem::path& path) override {
+    return base_->NewRandomAccessFile(path);
+  }
+  Status RenameReplace(const std::filesystem::path& from,
+                       const std::filesystem::path& to) override {
+    return base_->RenameReplace(from, to);
+  }
+  Result<bool> FileExists(const std::filesystem::path& path) override {
+    return base_->FileExists(path);
+  }
+  Result<std::vector<std::string>> GetChildren(const std::filesystem::path& dir) override {
+    return base_->GetChildren(dir);
+  }
+  Result<std::uint64_t> GetFileSize(const std::filesystem::path& path) override {
+    return base_->GetFileSize(path);
+  }
+  Status SyncFile(const std::filesystem::path& path) override { return base_->SyncFile(path); }
+  Status CreateDir(const std::filesystem::path& path) override { return base_->CreateDir(path); }
+  Result<std::unique_ptr<FileLock>> LockFile(const std::filesystem::path& path) override {
+    return base_->LockFile(path);
+  }
+  Status UnlockFile(std::unique_ptr<FileLock> lock) override {
+    return base_->UnlockFile(std::move(lock));
+  }
+
+ private:
+  std::shared_ptr<FileSystem> base_;
+  Gate* gate_;
+};
+
+// Found by CrashTortureTest.CrashesDuringFlushesWithInjectedErrors (msvc-asan,
+// once in 10,000 cycles): WaitForBackgroundWorkForTesting returned as soon as
+// a job failed, but the failed job still deletes obsolete tables before it
+// ends, and the test's reads raced those deletions (one of which was where
+// its simulated crash struck). A failed job is idle only once it has ended.
+TEST(BackgroundWaitTest, AFailedJobIsIdleOnlyOnceItsDeletionsAreDone) {
+  Options options;
+  options.memtable_bytes = std::size_t{8} << 10;
+  options.level0_compaction_trigger = 2;
+  Gate gate;
+  const auto faults = std::make_shared<FaultInjectionFileSystem>(std::make_shared<MemFileSystem>());
+  const auto fs = std::make_shared<RemovalGateFileSystem>(faults, &gate);
+  const std::unique_ptr<DB> db = std::move(OpenDB(options, "db", fs)).value();
+  int written = 0;
+  const auto write = [&](int n) {
+    for (int i = 0; i < n; ++i, ++written) {
+      ASSERT_TRUE(db->Put({}, Key(written), std::string(20, 'v')).ok());
+    }
+  };
+  // Two level-0 tables, and an iterator that keeps them in use.
+  write(20);
+  ASSERT_TRUE(Impl(*db).FlushForTesting().ok());
+  Impl(*db).SetCompactionsPausedForTesting(true);
+  write(20);
+  ASSERT_TRUE(Impl(*db).FlushForTesting().ok());
+  std::unique_ptr<Iterator> pinned = db->NewIterator({});
+  // The compaction removes them from the version; the next flush's record
+  // makes them deletable, but the iterator still uses them: they stay.
+  Impl(*db).SetCompactionsPausedForTesting(false);
+  Impl(*db).WaitForBackgroundWorkForTesting();
+  ASSERT_EQ(Impl(*db).CompactionsForTesting(), 1U);
+  write(20);
+  ASSERT_TRUE(Impl(*db).FlushForTesting().ok());
+  pinned.reset();
+
+  // The next flush fails syncing its table (the writer syncs the old log
+  // first: the 1st sync). It removes its unfinished table (let through),
+  // fails, then deletes the two tables: the gate holds the first of them.
+  gate.Close(/*free_passes=*/1);
+  faults->FailNth(FaultInjectionFileSystem::Op::kSync, 2);
+  while (!Impl(*db).FlushPendingForTesting()) {
+    ASSERT_TRUE(db->Put({}, Key(written++), std::string(100, 'v')).ok());
+  }
+  gate.WaitForArrival();  // the job failed and is deleting
+  ASSERT_FALSE(db->Put({}, "after", "x").ok()) << "the error is set";
+
+  std::atomic<bool> returned{false};
+  std::thread waiter([&] {
+    Impl(*db).WaitForBackgroundWorkForTesting();
+    Impl(*db).WaitForFlushForTesting();
+    returned.store(true);
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  EXPECT_FALSE(returned.load()) << "the failed job is still deleting files";
+  gate.Open();
+  waiter.join();
+  EXPECT_TRUE(returned.load());
+}
+
 TEST(CompactionShutdownTest, ShutdownAbandonsARunningCompaction) {
   Options options;
   options.memtable_bytes = std::size_t{16} << 10;

@@ -382,7 +382,8 @@ Result<RunResult> RunWorkload(EngineFactory& factory, std::string_view engine,
   result.workload = std::string(workload);
   result.run = run;
   {
-    FORGEDB_ASSIGN_OR_RETURN(std::unique_ptr<Engine> db, factory.Open(engine, dir, engine_options));
+    FORGEDB_ASSIGN_OR_RETURN(const std::unique_ptr<Engine> db,
+                             factory.Open(engine, dir, engine_options));
     const Keys keys(options.key_size);
     const Values values(options.value_size, options.seed + run);
     std::vector<std::uint64_t> permutation(options.num);

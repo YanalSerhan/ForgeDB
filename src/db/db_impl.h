@@ -194,14 +194,15 @@ class DBImpl final : public DB {
   // so the file operations of a run come in the same order every time (the
   // step-by-step crash tests need that).
   void SetSynchronousFlushForTesting(bool on);
-  // Waits until no flush is queued or running, and the background thread has
-  // finished its current job, file deletions included (or the background
-  // error is set).
+  // Waits until the background thread has finished its current job, file
+  // deletions included (also when the job failed), and no flush is queued
+  // or running (or the background error is set: then none will run).
   void WaitForFlushForTesting();
   // Whether a flush is queued or running (imm_ is set).
   [[nodiscard]] bool FlushPendingForTesting();
-  // Waits until the background thread has nothing to do: no flush, and no
-  // level scores 1 or more (or the background error is set).
+  // Waits until the background thread has finished its current job (file
+  // deletions included, also when the job failed) and has nothing to do: no
+  // flush, and no level scores 1 or more (or the background error is set).
   void WaitForBackgroundWorkForTesting();
   [[nodiscard]] std::uint64_t CompactionsForTesting();
   // Flushes the memtable (switching logs like a full one) and waits for the

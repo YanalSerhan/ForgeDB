@@ -10,6 +10,9 @@
   - Keeps going after a failure unless -StopOnFailure is given.
   - Writes every step's full output to out\logs\<preset>-<step>.log.
   - Prints a summary table and exits with 1 if anything failed.
+  - Runs the standard test sizes: test-size overrides left in the environment
+    (FORGEDB_CRASH_CYCLES and the like, meant for long runs by hand) are cleared
+    for this run, with a warning, and restored afterwards.
   CI runs this same script, one preset per job.
 
 .EXAMPLE
@@ -67,6 +70,10 @@ function Invoke-Step([string] $Preset, [string] $Step, [string] $CommandLine) {
 }
 
 $results = New-Object System.Collections.Generic.List[object]
+$testOverrides = @('FORGEDB_CRASH_CYCLES', 'FORGEDB_CRASH_SEED', 'FORGEDB_KILL_RUNS', 'FORGEDB_KILL_SEED',
+                   'FORGEDB_MODEL_OPS', 'FORGEDB_MODEL_SEED', 'FORGEDB_CORRUPTION_TRIALS',
+                   'FORGEDB_CORRUPTION_SEED', 'FORGEDB_STRESS_SECONDS', 'FORGEDB_STRESS_SEED')
+$savedOverrides = @{}
 
 Push-Location $repoRoot
 try {
@@ -76,6 +83,19 @@ try {
     $resolvedVcpkg = Resolve-VcpkgRoot $VcpkgRoot
     Write-Host "Using VCPKG_ROOT = $resolvedVcpkg"
     $testPresets = Get-TestPresetNames
+
+    # Test-size overrides (FORGEDB_CRASH_CYCLES=10000 and the like) are for long
+    # runs by hand. Left set, they make every preset's tests run for hours, so this
+    # script runs the standard sizes: it clears them for its own run and puts them
+    # back afterwards.
+    foreach ($name in $testOverrides) {
+        $value = [Environment]::GetEnvironmentVariable($name)
+        if ($null -ne $value) {
+            Write-Host "Ignoring $name=$value for this run (standard test sizes)" -ForegroundColor Yellow
+            $savedOverrides[$name] = $value
+            Remove-Item "Env:$name"
+        }
+    }
 
     foreach ($preset in $Presets) {
         $row = [ordered]@{ Preset = $preset; Configure = '-'; Build = '-'; Test = '-'; Seconds = 0 }
@@ -122,6 +142,9 @@ try {
     }
 }
 finally {
+    foreach ($name in $savedOverrides.Keys) {
+        Set-Item "Env:$name" $savedOverrides[$name]
+    }
     Pop-Location
 }
 

@@ -683,7 +683,15 @@ bool DBImpl::HasBackgroundWork() const {
 }
 
 bool DBImpl::BackgroundIdle() const {
-  return !background_error_.ok() || shutting_down_ || (!imm_ && !busy_ && !HasBackgroundWork());
+  if (shutting_down_) {
+    return true;
+  }
+  // A job is running until it has ended, file deletions included, even if
+  // it failed: a failed job still deletes files after setting the error.
+  if (busy_) {
+    return false;
+  }
+  return !background_error_.ok() || (!imm_ && !HasBackgroundWork());
 }
 
 void DBImpl::BackgroundThread() {
@@ -1067,7 +1075,7 @@ void DBImpl::SetSynchronousFlushForTesting(bool on) {
 
 void DBImpl::WaitForFlushForTesting() {
   const MutexLock lock(&mutex_);
-  while ((imm_ || busy_) && background_error_.ok()) {
+  while (busy_ || (imm_ && background_error_.ok())) {
     done_cv_.Wait(&mutex_);
   }
 }

@@ -7,9 +7,9 @@
 // histogram; Merge combines them.
 #pragma once
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace forgedb::bench {
 
@@ -33,7 +33,9 @@ class LatencyHistogram {
   [[nodiscard]] static std::uint64_t UpperEdge(std::size_t bucket) noexcept;
 
  private:
-  std::array<std::uint64_t, kBuckets> buckets_{};
+  // On the heap: results and per-thread tallies each hold a histogram, and
+  // 7.8 KB apiece on the stack added up (MSVC /analyze, C6262).
+  std::vector<std::uint64_t> buckets_ = std::vector<std::uint64_t>(kBuckets);
   std::uint64_t count_ = 0;
   std::uint64_t min_ = UINT64_MAX;
   std::uint64_t max_ = 0;
