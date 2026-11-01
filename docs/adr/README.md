@@ -13,3 +13,4 @@ One file per non-obvious decision, written when the decision is made. Copy
 | [0006](0006-table-format.md) | Table file format | Accepted |
 | [0007](0007-manifest-and-current.md) | The MANIFEST, and switching CURRENT without trusting the rename | Accepted (rule 5 extended to tables by 0008) |
 | [0008](0008-leveled-compaction.md) | Leveled compaction: what is compacted, what is dropped, and when files go | Accepted |
+| [0009](0009-concurrency-model.md) | Concurrency without a data-race detector on Windows (checked by Clang's thread-safety analysis) | Accepted |

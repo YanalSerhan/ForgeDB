@@ -37,6 +37,12 @@ function(forgedb_target_defaults target)
     # Report the real __cplusplus value and use the standard-conforming preprocessor.
     target_compile_options(${target} PRIVATE /Zc:__cplusplus /Zc:preprocessor)
   endif()
+  if(FORGEDB_COMPILER_CLANG_CL)
+    # Clang's thread-safety analysis: which mutex guards what
+    # (src/util/thread_annotations.h, ADR 0009). An error under /WX. MSVC
+    # ignores the annotations, so the clang-cl presets are the ones that check.
+    target_compile_options(${target} PRIVATE -Wthread-safety)
+  endif()
 
   # Win32 headers: target Windows 10+, keep <windows.h> small, no min/max
   # macros, and use the wide-character (W) APIs by default.

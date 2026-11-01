@@ -35,7 +35,6 @@
 #include <cstdint>
 #include <list>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -45,6 +44,8 @@
 #include "forgedb/check.h"
 
 #include "util/hash.h"
+#include "util/mutex.h"
+#include "util/thread_annotations.h"
 
 namespace forgedb {
 
@@ -123,7 +124,8 @@ class ShardedLruCache {
 
   // Precondition: no Handle is alive (checked in debug builds).
   ~ShardedLruCache() {
-    for ([[maybe_unused]] const std::unique_ptr<Shard>& shard : shards_) {
+    for (const std::unique_ptr<Shard>& shard : shards_) {
+      const MutexLock lock(&shard->mutex);
       FORGEDB_DCHECK(shard->in_use.empty() && shard->erased.empty());
     }
   }
@@ -161,7 +163,7 @@ class ShardedLruCache {
   [[nodiscard]] CacheStats GetStats() const {
     CacheStats total;
     for (const std::unique_ptr<Shard>& shard : shards_) {
-      const std::scoped_lock lock(shard->mutex);
+      const MutexLock lock(&shard->mutex);
       total.hits += shard->stats.hits;
       total.misses += shard->stats.misses;
       total.evictions += shard->stats.evictions;
@@ -193,7 +195,7 @@ class ShardedLruCache {
     // Inserts and returns the new entry with one reference.
     Entry* Insert(std::string_view key, T value, std::size_t charge) {
       EntryList garbage;  // destroyed after the lock is released
-      const std::scoped_lock lock(mutex);
+      const MutexLock lock(&mutex);
       if (const auto it = map.find(key); it != map.end()) {
         Entry* const old = it->second;
         map.erase(it);
@@ -209,7 +211,7 @@ class ShardedLruCache {
     }
 
     Entry* Lookup(std::string_view key) {
-      const std::scoped_lock lock(mutex);
+      const MutexLock lock(&mutex);
       const auto it = map.find(key);
       if (it == map.end()) {
         ++stats.misses;
@@ -226,7 +228,7 @@ class ShardedLruCache {
 
     void Erase(std::string_view key) {
       EntryList garbage;
-      const std::scoped_lock lock(mutex);
+      const MutexLock lock(&mutex);
       if (const auto it = map.find(key); it != map.end()) {
         Entry* const entry = it->second;
         map.erase(it);
@@ -236,7 +238,7 @@ class ShardedLruCache {
 
     void Release(Entry* entry) noexcept {
       EntryList garbage;
-      const std::scoped_lock lock(mutex);
+      const MutexLock lock(&mutex);
       FORGEDB_DCHECK(entry->refs > 0);
       if (--entry->refs > 0) {
         return;
@@ -253,7 +255,7 @@ class ShardedLruCache {
     // Removes a cached entry (already out of the map) from the accounting: an
     // unused entry moves to `garbage`, an entry in use to `erased` until its
     // last handle goes.
-    void Unlink(Entry& entry, EntryList& garbage) noexcept {
+    void Unlink(Entry& entry, EntryList& garbage) noexcept FORGEDB_REQUIRES(mutex) {
       usage -= entry.charge;
       if (entry.where == Where::kLru) {
         garbage.splice(garbage.end(), lru, entry.self);
@@ -263,7 +265,7 @@ class ShardedLruCache {
       }
     }
 
-    void EvictWhileOverCapacity(EntryList& garbage) noexcept {
+    void EvictWhileOverCapacity(EntryList& garbage) noexcept FORGEDB_REQUIRES(mutex) {
       while (usage > capacity && !lru.empty()) {
         const Entry& oldest = lru.front();
         map.erase(oldest.key);
@@ -273,16 +275,18 @@ class ShardedLruCache {
       }
     }
 
-    mutable std::mutex mutex;
+    // Guards everything below but `capacity` (set before the cache is used),
+    // and the refs, where and self of this shard's entries.
+    mutable Mutex mutex;
     std::size_t capacity = 0;
-    std::size_t usage = 0;
-    EntryList lru;     // cached, no handles; front = least recently used
-    EntryList in_use;  // cached, with handles
-    EntryList erased;  // no longer cached, still with handles
+    std::size_t usage FORGEDB_GUARDED_BY(mutex) = 0;
+    EntryList lru FORGEDB_GUARDED_BY(mutex);     // cached, no handles; front = least recently used
+    EntryList in_use FORGEDB_GUARDED_BY(mutex);  // cached, with handles
+    EntryList erased FORGEDB_GUARDED_BY(mutex);  // no longer cached, still with handles
     // Keys are views of the entries' own keys, which never move: list nodes
     // stay put when spliced between lists.
-    std::unordered_map<std::string_view, Entry*> map;
-    CacheStats stats;
+    std::unordered_map<std::string_view, Entry*> map FORGEDB_GUARDED_BY(mutex);
+    CacheStats stats FORGEDB_GUARDED_BY(mutex);
   };
 
   Shard& ShardFor(std::string_view key) noexcept {

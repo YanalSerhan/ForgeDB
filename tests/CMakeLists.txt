@@ -38,6 +38,7 @@ add_executable(forgedb_unit_tests
   unit/log_test.cpp
   unit/lru_cache_test.cpp
   unit/memtable_test.cpp
+  unit/mutex_test.cpp
   unit/merging_iterator_test.cpp
   unit/result_test.cpp
   unit/skip_list_test.cpp
@@ -161,6 +162,19 @@ target_compile_definitions(forgedb_stress_tests PRIVATE
   FORGEDB_STRESS_TEST_SECONDS=${forgedb_stress_seconds})
 forgedb_target_defaults(forgedb_stress_tests)
 gtest_discover_tests(forgedb_stress_tests DISCOVERY_MODE PRE_TEST)
+
+# Thread-safety canary (clang-cl only; ADR 0009): a file that touches a
+# FORGEDB_GUARDED_BY member without its mutex. The test passes only if the
+# compiler rejects it with the analysis's message, which proves the analysis
+# really runs on ForgeDB's code (every target gets -Wthread-safety).
+if(FORGEDB_COMPILER_CLANG_CL)
+  add_test(NAME ThreadSafetyCanary.UnguardedAccessIsAnError
+    COMMAND "${CMAKE_CXX_COMPILER}" /nologo /std:c++20 /EHsc /Zs /WX -Wthread-safety
+            "-I${PROJECT_SOURCE_DIR}/src" "-I${PROJECT_SOURCE_DIR}/include"
+            "${CMAKE_CURRENT_SOURCE_DIR}/static/thread_safety_canary.cpp")
+  set_tests_properties(ThreadSafetyCanary.UnguardedAccessIsAnError PROPERTIES
+    PASS_REGULAR_EXPRESSION "requires holding mutex 'mutex_'")
+endif()
 
 # ASan canary (sanitizer builds only): a program that overflows a heap buffer
 # on purpose. The test passes only if ASan's report appears, which proves the

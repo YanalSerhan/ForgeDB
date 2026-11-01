@@ -22,8 +22,8 @@
 //
 // Not thread-safe, except NewFileNumber(): the DB calls it from one thread at
 // a time (the opening thread, then the background thread) and publishes
-// Current() to readers under its own mutex; the write leader also takes file
-// numbers for new logs.
+// Current() to readers under the DB's mutex; the write leader also takes file
+// numbers for new logs (ADR 0009, rule 7).
 #pragma once
 
 #include <array>

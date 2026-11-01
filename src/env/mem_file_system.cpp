@@ -25,7 +25,7 @@ class MemWritableFile final : public WritableFile {
 
   Status Append(std::string_view data) override {
     FORGEDB_RETURN_IF_ERROR(CheckOpen());
-    const std::scoped_lock lock(data_->mutex);
+    const MutexLock lock(&data_->mutex);
     data_->contents.append(data);
     return Status::OK();
   }
@@ -49,7 +49,7 @@ class MemWritableFile final : public WritableFile {
 
 // Copies up to buffer.size() bytes starting at `offset`; returns the count.
 std::size_t ReadAt(FileData& data, std::uint64_t offset, std::span<char> buffer) {
-  const std::scoped_lock lock(data.mutex);
+  const MutexLock lock(&data.mutex);
   if (offset >= data.contents.size()) {
     return 0;
   }
@@ -132,14 +132,14 @@ std::shared_ptr<FileData> MemFileSystem::Find(const Key& key) const {
 }
 
 void MemFileSystem::ReleaseLock(const Key& key) {
-  const std::scoped_lock lock(mutex_);
+  const MutexLock lock(&mutex_);
   locked_.erase(key);
 }
 
 Result<std::unique_ptr<WritableFile>> MemFileSystem::NewWritableFile(
     const std::filesystem::path& path) {
   const Key key = KeyOf(path);
-  const std::scoped_lock lock(mutex_);
+  const MutexLock lock(&mutex_);
   if (!ParentExists(key)) {
     return NotFound("NewWritableFile: parent directory of", path);
   }
@@ -150,7 +150,7 @@ Result<std::unique_ptr<WritableFile>> MemFileSystem::NewWritableFile(
   // handles already open on it see it become empty.
   std::shared_ptr<FileData>& data = files_[key];
   if (data) {
-    const std::scoped_lock data_lock(data->mutex);
+    const MutexLock data_lock(&data->mutex);
     data->contents.clear();
   } else {
     data = std::make_shared<FileData>();
@@ -160,7 +160,7 @@ Result<std::unique_ptr<WritableFile>> MemFileSystem::NewWritableFile(
 
 Result<std::unique_ptr<SequentialFile>> MemFileSystem::NewSequentialFile(
     const std::filesystem::path& path) {
-  const std::scoped_lock lock(mutex_);
+  const MutexLock lock(&mutex_);
   std::shared_ptr<FileData> data = Find(KeyOf(path));
   if (!data) {
     return NotFound("NewSequentialFile", path);
@@ -170,7 +170,7 @@ Result<std::unique_ptr<SequentialFile>> MemFileSystem::NewSequentialFile(
 
 Result<std::unique_ptr<RandomAccessFile>> MemFileSystem::NewRandomAccessFile(
     const std::filesystem::path& path) {
-  const std::scoped_lock lock(mutex_);
+  const MutexLock lock(&mutex_);
   std::shared_ptr<FileData> data = Find(KeyOf(path));
   if (!data) {
     return NotFound("NewRandomAccessFile", path);
@@ -182,7 +182,7 @@ Status MemFileSystem::RenameReplace(const std::filesystem::path& from,
                                     const std::filesystem::path& to) {
   const Key from_key = KeyOf(from);
   const Key to_key = KeyOf(to);
-  const std::scoped_lock lock(mutex_);
+  const MutexLock lock(&mutex_);
   const auto it = files_.find(from_key);
   if (it == files_.end()) {
     return NotFound("RenameReplace", from);
@@ -207,7 +207,7 @@ Status MemFileSystem::RenameReplace(const std::filesystem::path& from,
 
 Status MemFileSystem::RemoveFile(const std::filesystem::path& path) {
   const Key key = KeyOf(path);
-  const std::scoped_lock lock(mutex_);
+  const MutexLock lock(&mutex_);
   if (!files_.contains(key)) {
     return NotFound("RemoveFile", path);
   }
@@ -220,14 +220,14 @@ Status MemFileSystem::RemoveFile(const std::filesystem::path& path) {
 
 Result<bool> MemFileSystem::FileExists(const std::filesystem::path& path) {
   const Key key = KeyOf(path);
-  const std::scoped_lock lock(mutex_);
+  const MutexLock lock(&mutex_);
   return files_.contains(key) || dirs_.contains(key);
 }
 
 Result<std::vector<std::string>> MemFileSystem::GetChildren(const std::filesystem::path& dir) {
   const Key key = KeyOf(dir);
   const std::filesystem::path dir_path(key);
-  const std::scoped_lock lock(mutex_);
+  const MutexLock lock(&mutex_);
   if (!dirs_.contains(key)) {
     return NotFound("GetChildren", dir);
   }
@@ -250,18 +250,18 @@ Result<std::vector<std::string>> MemFileSystem::GetChildren(const std::filesyste
 Result<std::uint64_t> MemFileSystem::GetFileSize(const std::filesystem::path& path) {
   std::shared_ptr<FileData> data;
   {
-    const std::scoped_lock lock(mutex_);
+    const MutexLock lock(&mutex_);
     data = Find(KeyOf(path));
   }
   if (!data) {
     return NotFound("GetFileSize", path);
   }
-  const std::scoped_lock data_lock(data->mutex);
+  const MutexLock data_lock(&data->mutex);
   return static_cast<std::uint64_t>(data->contents.size());
 }
 
 Status MemFileSystem::SyncFile(const std::filesystem::path& path) {
-  const std::scoped_lock lock(mutex_);
+  const MutexLock lock(&mutex_);
   if (!Find(KeyOf(path))) {
     return NotFound("SyncFile", path);
   }
@@ -270,7 +270,7 @@ Status MemFileSystem::SyncFile(const std::filesystem::path& path) {
 
 Status MemFileSystem::CreateDir(const std::filesystem::path& path) {
   const Key key = KeyOf(path);
-  const std::scoped_lock lock(mutex_);
+  const MutexLock lock(&mutex_);
   if (dirs_.contains(key)) {
     return Status::OK();
   }
@@ -286,7 +286,7 @@ Status MemFileSystem::CreateDir(const std::filesystem::path& path) {
 
 Result<std::unique_ptr<FileLock>> MemFileSystem::LockFile(const std::filesystem::path& path) {
   const Key key = KeyOf(path);
-  const std::scoped_lock lock(mutex_);
+  const MutexLock lock(&mutex_);
   if (!ParentExists(key)) {
     return NotFound("LockFile: parent directory of", path);
   }

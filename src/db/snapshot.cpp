@@ -2,7 +2,6 @@
 
 #include <cstddef>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <utility>
 
@@ -11,17 +10,17 @@ namespace forgedb {
 Snapshot::~Snapshot() = default;
 
 SnapshotList::Entry SnapshotList::Add(SequenceNumber sequence) {
-  const std::scoped_lock lock(mutex_);
+  const MutexLock lock(&mutex_);
   return sequences_.insert(sequence);
 }
 
 void SnapshotList::Remove(const Entry& entry) {
-  const std::scoped_lock lock(mutex_);
+  const MutexLock lock(&mutex_);
   sequences_.erase(entry);
 }
 
 std::optional<SequenceNumber> SnapshotList::Oldest() const {
-  const std::scoped_lock lock(mutex_);
+  const MutexLock lock(&mutex_);
   if (sequences_.empty()) {
     return std::nullopt;
   }
@@ -29,7 +28,7 @@ std::optional<SequenceNumber> SnapshotList::Oldest() const {
 }
 
 std::size_t SnapshotList::Count() const {
-  const std::scoped_lock lock(mutex_);
+  const MutexLock lock(&mutex_);
   return sequences_.size();
 }
 

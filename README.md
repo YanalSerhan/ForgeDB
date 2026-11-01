@@ -9,8 +9,8 @@ memtables are flushed to immutable, sorted table files with bloom filters, and a
 which files are live, so the database recovers to a consistent state after a crash. The core
 library has no third-party dependencies.
 
-**Status: Phase 4 in progress: snapshots, background flushes, leveled compaction, statistics
-and the stress test are done; the exit-gate runs and the concurrency ADR are next.** Not for production use.
+**Status: Phase 4 closed (snapshots, background flushes, leveled compaction, statistics, the
+stress test, and compile-time lock checking); Phase 5 (benchmarks and tuning) is next.** Not for production use.
 See [TODO.md](TODO.md) for the plan.
 
 ```cpp
@@ -228,9 +228,10 @@ command's own open did (a compaction it set off, for example; not the recovery t
   `WriteBatch`.
 - Power-loss safety is verified with a simulated file system; real behavior also depends on the
   drive honoring flush requests ("Turn off Windows write-cache buffer flushing" voids it; ADR
-  0002). There is no data-race detector on Windows; concurrency is verified by design, stress
-  tests and assertions (and, during development, ThreadSanitizer runs of the portable code on
-  Linux).
+  0002). There is no data-race detector on Windows. Concurrency is verified by design (ADR
+  0009), by Clang's thread-safety analysis in the clang-cl builds (which mutex guards what is a
+  compile error to get wrong), by stress tests and assertions, and, during development, by
+  ThreadSanitizer runs of the portable code on Linux.
 - Snapshots are not saved: they end when the DB is closed.
 - Damage to the newest log drops the writes after it instead of failing the open (point-in-time
   recovery, reported in `RecoveryInfo` and by `forgedb_cli stats`; ADR 0004 rule 6). A newest log

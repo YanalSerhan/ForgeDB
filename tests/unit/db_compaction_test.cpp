@@ -718,9 +718,15 @@ TEST(CompactionShutdownTest, ShutdownAbandonsARunningCompaction) {
   const auto base = std::make_shared<MemFileSystem>();
   const auto fs = std::make_shared<GatedFileSystem>(base, &gate);
   std::unique_ptr<DB> db = std::move(OpenDB(options, "db", fs)).value();
-  gate.Close(/*free_passes=*/2);  // the two flushes pass; the compaction's first output waits
   int written = 0;
-  while (Impl(*db).FlushesForTesting() < 2) {
+  for (; written < 200; ++written) {
+    ASSERT_TRUE(db->Put({}, Key(written), std::string(20, 'v')).ok());
+  }
+  ASSERT_TRUE(Impl(*db).FlushForTesting().ok());  // the first level-0 table
+  // The second, by filling the memtable; writing stops at the switch, so no
+  // third flush can queue up ahead of the compaction.
+  gate.Close(/*free_passes=*/1);  // the flush passes; the compaction's first output waits
+  while (!Impl(*db).FlushPendingForTesting() && Impl(*db).FlushesForTesting() < 2) {
     ASSERT_TRUE(db->Put({}, Key(written), std::string(20, 'v')).ok());
     ++written;
   }

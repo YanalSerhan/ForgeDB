@@ -18,12 +18,13 @@
 #include <filesystem>
 #include <map>
 #include <memory>
-#include <mutex>
 #include <set>
 #include <string>
 #include <vector>
 
 #include "env/file_system.h"
+#include "util/mutex.h"
+#include "util/thread_annotations.h"
 
 namespace forgedb {
 
@@ -52,8 +53,8 @@ class MemFileSystem final : public FileSystem {
 
   // The contents of a file shared by every handle to it.
   struct FileData {
-    std::mutex mutex;
-    std::string contents;
+    Mutex mutex;
+    std::string contents FORGEDB_GUARDED_BY(mutex);
   };
 
  private:
@@ -61,15 +62,14 @@ class MemFileSystem final : public FileSystem {
   using Key = std::filesystem::path::string_type;
 
   [[nodiscard]] static Key KeyOf(const std::filesystem::path& path);
-  // Requires mutex_.
-  [[nodiscard]] bool ParentExists(const Key& key) const;
-  [[nodiscard]] std::shared_ptr<FileData> Find(const Key& key) const;
-  void ReleaseLock(const Key& key);
+  [[nodiscard]] bool ParentExists(const Key& key) const FORGEDB_REQUIRES(mutex_);
+  [[nodiscard]] std::shared_ptr<FileData> Find(const Key& key) const FORGEDB_REQUIRES(mutex_);
+  void ReleaseLock(const Key& key) FORGEDB_EXCLUDES(mutex_);
 
-  mutable std::mutex mutex_;
-  std::map<Key, std::shared_ptr<FileData>> files_;
-  std::set<Key> dirs_;
-  std::set<Key> locked_;
+  mutable Mutex mutex_;
+  std::map<Key, std::shared_ptr<FileData>> files_ FORGEDB_GUARDED_BY(mutex_);
+  std::set<Key> dirs_ FORGEDB_GUARDED_BY(mutex_);
+  std::set<Key> locked_ FORGEDB_GUARDED_BY(mutex_);
 };
 
 }  // namespace forgedb

@@ -78,6 +78,13 @@
 //   stalls are added when they end. GetStats copies it and the current
 //   Version's level sizes under the lock.
 //
+// Locking (Phase 4.6, ADR 0009)
+//   mutex_ guards every member marked FORGEDB_GUARDED_BY(mutex_), and
+//   functions marked FORGEDB_REQUIRES(mutex_) need it held; clang-cl checks
+//   both at compile time. It is never held during I/O. Members owned by a
+//   role instead (the write leader's, the background thread's) are listed
+//   under those headings below; the analysis cannot check them.
+//
 // Snapshots (Phase 4.1)
 //   A snapshot is a sequence number registered in snapshots_; a read with
 //   one uses it instead of last_sequence_.
@@ -97,12 +104,10 @@
 
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <filesystem>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -121,6 +126,8 @@
 #include "log/log_writer.h"
 #include "memtable/memtable.h"
 #include "table/table.h"
+#include "util/mutex.h"
+#include "util/thread_annotations.h"
 
 namespace forgedb {
 
@@ -218,9 +225,11 @@ class DBImpl final : public DB {
     bool sync;
     bool force_flush = false;      // FlushForTesting: switch memtables, write nothing
     std::uint64_t user_bytes = 0;  // keys + values of the batch (DBStats::user_bytes)
-    bool done = false;             // set by the leader that wrote this writer's batch
-    Status status;                 // valid once done
-    std::condition_variable cv;
+    // These two are guarded by DBImpl::mutex_ (the analysis cannot name an
+    // outer class's mutex from a nested struct).
+    bool done = false;  // set by the leader that wrote this writer's batch
+    Status status;      // valid once done
+    CondVar cv;
   };
 
   // What a read needs, taken under mutex_.
@@ -231,7 +240,8 @@ class DBImpl final : public DB {
     SequenceNumber sequence = 0;  // the snapshot's, or last_sequence_
   };
   // InvalidArgument if options.snapshot is not one of this DB's.
-  [[nodiscard]] Result<ReadView> CurrentReadView(const ReadOptions& options);
+  [[nodiscard]] Result<ReadView> CurrentReadView(const ReadOptions& options)
+      FORGEDB_EXCLUDES(mutex_);
 
   // A flush handed to the background thread.
   struct FlushJob {
@@ -248,38 +258,40 @@ class DBImpl final : public DB {
     Writer* last = nullptr;
     bool sync = false;
   };
-  [[nodiscard]] Group BuildGroup();
+  [[nodiscard]] Group BuildGroup() FORGEDB_REQUIRES(mutex_);
 
-  // Leader only, mutex_ held via `lock` (released around I/O and while
-  // waiting). Switches memtables if the memtable is full, waiting for the
+  // Leader only, mutex_ held (released around I/O and while waiting).
+  // Switches memtables if the memtable is full, waiting for the
   // previous flush first (see "Flush" at the top). Returns
   // background_error_ if it is set, or sets it if switching fails.
   // Also delays or stops writes while level 0 has too many tables (see
   // "Write stalls"). `force` switches even a memtable that is not full.
-  [[nodiscard]] Status MakeRoomForWrite(std::unique_lock<std::mutex>& lock, bool force = false);
-  [[nodiscard]] Status SwitchMemtable(std::unique_lock<std::mutex>& lock);
+  [[nodiscard]] Status MakeRoomForWrite(bool force = false) FORGEDB_REQUIRES(mutex_);
+  [[nodiscard]] Status SwitchMemtable() FORGEDB_REQUIRES(mutex_);
 
-  // The background thread (see "Background work" at the top). mutex_ is held
-  // via `lock`, released around I/O.
-  void BackgroundThread();
-  [[nodiscard]] bool HasBackgroundWork() const;  // mutex_ held
-  [[nodiscard]] bool BackgroundIdle() const;     // mutex_ held
-  void DoFlush(std::unique_lock<std::mutex>& lock);
-  // mutex_ not held. Sets *bytes_written to the new table's size.
-  [[nodiscard]] Status RunFlush(const FlushJob& job, std::uint64_t* bytes_written);
-  void DoCompaction(std::unique_lock<std::mutex>& lock, const Compaction& compaction, bool manual);
-  // Runs a compaction (mutex_ not held): writes its outputs and records them
-  // in the MANIFEST. Sets *abandoned if it stopped for shutdown. On success,
-  // adds what it did to *stats (all but the time).
+  // The background thread (see "Background work" at the top). The Do*
+  // functions are called with mutex_ held and release it around I/O.
+  void BackgroundThread() FORGEDB_EXCLUDES(mutex_);
+  [[nodiscard]] bool HasBackgroundWork() const FORGEDB_REQUIRES(mutex_);
+  [[nodiscard]] bool BackgroundIdle() const FORGEDB_REQUIRES(mutex_);
+  void DoFlush() FORGEDB_REQUIRES(mutex_);
+  // Sets *bytes_written to the new table's size.
+  [[nodiscard]] Status RunFlush(const FlushJob& job, std::uint64_t* bytes_written)
+      FORGEDB_EXCLUDES(mutex_);
+  void DoCompaction(const Compaction& compaction, bool manual) FORGEDB_REQUIRES(mutex_);
+  // Runs a compaction: writes its outputs and records them in the
+  // MANIFEST. Sets *abandoned if it stopped for shutdown. On success, adds
+  // what it did to *stats (all but the time).
   [[nodiscard]] Status RunCompaction(const Compaction& compaction, bool allow_trivial_move,
-                                     bool* abandoned, CompactionStats* stats);
+                                     bool* abandoned, CompactionStats* stats)
+      FORGEDB_EXCLUDES(mutex_);
   // Called by a running compaction now and then: runs a queued flush.
-  void FlushDuringCompaction();
+  void FlushDuringCompaction() FORGEDB_EXCLUDES(mutex_);
   // After every MANIFEST record: tables removed by the record before become
   // deletable (ADR 0007 rule 5, ADR 0008).
   void RecordEdit(const VersionEdit& edit);
   // Deletes deletable tables no version uses any more, and retired logs.
-  void DeleteObsoleteBackgroundFiles(std::unique_lock<std::mutex>& lock);
+  void DeleteObsoleteBackgroundFiles() FORGEDB_REQUIRES(mutex_);
 
   // Writes `memtable` to a new level-0 table, synced and closed, and adds it
   // to `edit`. Writes nothing for an empty memtable. Open or background
@@ -307,27 +319,29 @@ class DBImpl final : public DB {
   std::unique_ptr<FileLock> lock_;
   RecoveryInfo recovery_;  // set once by Recover()
 
-  std::mutex mutex_;
-  std::deque<Writer*> writers_;             // guarded by mutex_
-  Status background_error_;                 // guarded by mutex_; sticky
-  MemTableRef mem_;                         // guarded by mutex_
-  MemTableRef imm_;                         // guarded by mutex_; set while flushing
-  std::shared_ptr<const Version> version_;  // guarded by mutex_
-  SequenceNumber last_sequence_ = 0;        // guarded by mutex_
-  std::uint64_t groups_written_ = 0;        // guarded by mutex_
+  // Everything below marked FORGEDB_GUARDED_BY(mutex_) is read and written
+  // only with mutex_ held; clang-cl checks it at compile time (ADR 0009).
+  Mutex mutex_;
+  std::deque<Writer*> writers_ FORGEDB_GUARDED_BY(mutex_);
+  Status background_error_ FORGEDB_GUARDED_BY(mutex_);  // sticky
+  MemTableRef mem_ FORGEDB_GUARDED_BY(mutex_);
+  MemTableRef imm_ FORGEDB_GUARDED_BY(mutex_);  // set while flushing
+  std::shared_ptr<const Version> version_ FORGEDB_GUARDED_BY(mutex_);
+  SequenceNumber last_sequence_ FORGEDB_GUARDED_BY(mutex_) = 0;
+  std::uint64_t groups_written_ FORGEDB_GUARDED_BY(mutex_) = 0;
   // Since the open; levels[i].compactions only (see "Statistics").
-  DBStats stats_;                          // guarded by mutex_
-  std::optional<FlushJob> pending_flush_;  // guarded by mutex_; for the background thread
-  bool shutting_down_ = false;             // guarded by mutex_
-  bool synchronous_flush_ = false;         // guarded by mutex_
-  bool busy_ = false;                      // guarded by mutex_; a background job is running
-  bool compactions_paused_ = false;        // guarded by mutex_
-  std::optional<int> manual_level_;        // guarded by mutex_; CompactLevelForTesting
-  std::uint64_t manual_done_ = 0;          // guarded by mutex_; manual compactions finished
+  DBStats stats_ FORGEDB_GUARDED_BY(mutex_);
+  std::optional<FlushJob> pending_flush_ FORGEDB_GUARDED_BY(mutex_);  // for the background thread
+  bool shutting_down_ FORGEDB_GUARDED_BY(mutex_) = false;
+  bool synchronous_flush_ FORGEDB_GUARDED_BY(mutex_) = false;
+  bool busy_ FORGEDB_GUARDED_BY(mutex_) = false;  // a background job is running
+  bool compactions_paused_ FORGEDB_GUARDED_BY(mutex_) = false;
+  std::optional<int> manual_level_ FORGEDB_GUARDED_BY(mutex_);  // CompactLevelForTesting
+  std::uint64_t manual_done_ FORGEDB_GUARDED_BY(mutex_) = 0;    // manual compactions finished
   // The log the last flush retired, kept until the next MANIFEST record.
-  std::optional<std::uint64_t> retired_log_;  // guarded by mutex_
-  std::condition_variable work_cv_;           // wakes the background thread
-  std::condition_variable done_cv_;           // background work finished: wakes waiting writers
+  std::optional<std::uint64_t> retired_log_ FORGEDB_GUARDED_BY(mutex_);
+  CondVar work_cv_;  // wakes the background thread
+  CondVar done_cv_;  // background work finished: wakes waiting writers
   // Read without mutex_ by a running compaction.
   std::atomic<bool> flush_queued_{false};
   std::atomic<bool> stopping_{false};

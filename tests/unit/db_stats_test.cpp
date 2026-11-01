@@ -393,9 +393,17 @@ TEST(StatsTimeTest, AFlushInsideACompactionIsNotCompactionTime) {
       kDelay);
   const auto start = std::chrono::steady_clock::now();
   const std::unique_ptr<DB> db = std::move(OpenDB(options, "db", slow)).value();
-  gate.Close(/*free_passes=*/2);  // the two flushes pass; the compaction's first output waits
+  // The first level-0 table, with the gate open.
   int written = 0;
-  while (Impl(*db).FlushesForTesting() < 2) {
+  for (; written < 200; ++written) {
+    ASSERT_TRUE(db->Put({}, Key(written), std::string(20, 'v')).ok());
+  }
+  ASSERT_TRUE(Impl(*db).FlushForTesting().ok());
+  // The second, by filling the memtable. Writing stops at the switch: one
+  // more would need a whole memtable of writes, and a third flush queued
+  // ahead of the compaction would take the gate's place (seen under Wine).
+  gate.Close(/*free_passes=*/1);  // the flush passes; the compaction's first output waits
+  while (!Impl(*db).FlushPendingForTesting() && Impl(*db).FlushesForTesting() < 2) {
     ASSERT_TRUE(db->Put({}, Key(written++), std::string(20, 'v')).ok());
   }
   gate.WaitForArrival();

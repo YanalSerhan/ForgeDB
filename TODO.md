@@ -329,12 +329,14 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 
 ### 4.6 Docs
 - [x] ADR: compaction policy and thresholds (ADR 0008, written with 4.3)
-- [ ] ADR: concurrency model without TSan (single writer, immutable files, pinned versions)
+- [x] ADR: concurrency model without TSan (single writer, immutable files, pinned versions) (ADR 0009. Approved addition: the rule "the DB mutex guards this" is checked by the compiler. `src/util/mutex.h` (`Mutex`, `MutexLock`, `CondVar`) carries Clang thread-safety annotations (`src/util/thread_annotations.h`); every target built with clang-cl gets `-Wthread-safety`, an error under /WX. `DBImpl`, `SnapshotList`, the LRU cache shards and `MemFileSystem` lock through it, with every guarded member marked `FORGEDB_GUARDED_BY`; waits are loops instead of predicate lambdas. `ThreadSafetyCanary.UnguardedAccessIsAnError` proves the analysis runs; `MutexTest`/`CondVarTest` test the wrappers. Checked on Linux with clang 18: removing a lock, forgetting to retake one, and waiting without one are each a compile error. Also fixed a test race seen once under Wine: `StatsTimeTest` and `CompactionShutdownTest` wrote until two flushes had finished, so a slow background thread could let a third flush queue up ahead of the compaction they meant to hold; they now stop writing at the memtable switch)
 
 ### ✅ Exit gate — Phase 4
 - [x] Stress test runs 10 minutes clean, three times in a row (2026-10-30, commit f176cf9, `scripts\stress.ps1` in msvc-asan with assertions, real files: 3 × 618 s, seeds 14000208118381657317, 2356472407621798825, 11495261669295685729; 534–562 writes/s of 4-key batches, 215–227 Gets/s, 85–91 scans/s, 129–137 snapshot reads/s, 491–534 held-snapshot checks, 4,859–5,032 compactions and 6 opens per run)
 - [x] Crash torture passes 10,000 iterations with compaction enabled (2026-10-30, msvc-release, `FORGEDB_CRASH_CYCLES=10000`: all 11 variants passed, 3 seeds each, so 30,000 cycles per variant and 330,000 in all; every variant compacted, 6,428 to 77,108 compactions each, including the two that crash during compactions)
 - [x] Write amplification reported for a 1-million-key random-write workload (2026-10-31, commit e80650e, msvc-release, i7-10750H laptop: `BM_FillRandomWriteAmplification`, `bench/db_fill_bench.cpp`: 1,000,000 distinct random 16-byte keys, 100-byte values, unsynced, default `Options`, real files. 3 runs: write amplification 5.08, 5.18, 5.18 when the last write returned and 5.26, 5.27, 5.37 once compaction settled (116.0 MB of keys and values; 125.7 MB of tables written by 35 flushes, 485–497 MB by 61 compactions and trivial moves; 138.0 MB of log, not counted); 137–142 k writes/s; no stalls. The data ends in levels 1 to 3, mostly level 2 (49 tables, 103 MB))
+
+> Phase 4 closed (2026-11-01): every item and exit-gate check met on Windows. The closing build (4.6, the commit that adds this note): all eight presets built with no warnings, every test preset passed (522–525 tests), and every clang-cl compile ran with `-Wthread-safety`. Two things in that run, both explained: `FORGEDB_CRASH_CYCLES=10000` was still set from the gate run, so the crash-torture tests ran 100× longer than usual (and passed); and `TableCacheTest.ConcurrentLookups` took 3.7 hours once in clangcl-debug (0.65–1.42 s elsewhere), most likely while the laptop slept. Rerun 200 times in clangcl-debug: all passed, 1.27–1.56 s each.
 
 ---
 
@@ -397,7 +399,7 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - [ ] Single process per database (enforced by the `LOCK` file)
 - [ ] No transactions beyond atomic `WriteBatch`
 - [ ] Power-loss safety is verified with a simulated file system; real behaviour also depends on the drive's write cache
-- [ ] No data-race detector on Windows; concurrency is verified by design, stress tests and assertions
+- [ ] No data-race detector on Windows; concurrency is verified by design, stress tests and assertions (since 4.6 also by Clang's thread-safety analysis in the clang-cl builds: ADR 0009)
 - [ ] Durability needs a drive that honors flush requests; "Turn off Windows write-cache buffer flushing" voids it (ADR 0002, F4)
 - [ ] File systems without POSIX delete (FAT32, some network shares, Wine) keep a removed file's name until its last handle closes (ADR 0002, rule 7)
 - [ ] Database paths are limited to MAX_PATH unless Windows long paths are enabled

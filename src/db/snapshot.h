@@ -8,13 +8,14 @@
 
 #include <cstddef>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <set>
 
 #include "forgedb/snapshot.h"
 
 #include "db/internal_key.h"
+#include "util/mutex.h"
+#include "util/thread_annotations.h"
 
 namespace forgedb {
 
@@ -30,8 +31,8 @@ class SnapshotList {
   [[nodiscard]] std::size_t Count() const;
 
  private:
-  mutable std::mutex mutex_;
-  std::multiset<SequenceNumber> sequences_;  // guarded by mutex_
+  mutable Mutex mutex_;
+  std::multiset<SequenceNumber> sequences_ FORGEDB_GUARDED_BY(mutex_);
 };
 
 class SnapshotImpl final : public Snapshot {

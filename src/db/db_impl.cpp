@@ -350,9 +350,12 @@ Status DBImpl::Recover() {
   recovery_.new_log_number = log_number_;
   recovery_.new_manifest_number = versions_->ManifestNumber();
 
-  last_sequence_ = last_sequence;
-  version_ = versions_->Current();
-  mem_ = MemTable::Create();
+  {
+    const MutexLock publish(&mutex_);  // no other thread yet; the analysis wants it anyway
+    last_sequence_ = last_sequence;
+    version_ = versions_->Current();
+    mem_ = MemTable::Create();
+  }
   DeleteObsoleteFiles();
   background_thread_ = std::thread([this] { BackgroundThread(); });
   return Status::OK();
@@ -423,15 +426,15 @@ Status DB::Delete(const WriteOptions& options, std::string_view key) {
 
 DBImpl::~DBImpl() {
   // Destroying a DB while writes are in flight is a caller bug.
-  FORGEDB_DCHECK(writers_.empty());
   // Stop the background thread: it finishes a flush that is running and
   // starts nothing new (see "Shutdown" in db_impl.h).
   {
-    const std::scoped_lock lock(mutex_);
+    const MutexLock lock(&mutex_);
+    FORGEDB_DCHECK(writers_.empty());
     shutting_down_ = true;
   }
   stopping_.store(true);  // a running compaction stops at its next check
-  work_cv_.notify_all();
+  work_cv_.SignalAll();
   if (background_thread_.joinable()) {
     background_thread_.join();
   }
@@ -456,9 +459,11 @@ Status DBImpl::Write(const WriteOptions& options, const WriteBatch& batch) {
 
   Writer self(&batch, options.sync);
   self.user_bytes = sizes.Bytes();
-  std::unique_lock lock(mutex_);
+  MutexLock lock(&mutex_);
   writers_.push_back(&self);
-  self.cv.wait(lock, [&] { return self.done || &self == writers_.front(); });
+  while (!self.done && &self != writers_.front()) {
+    self.cv.Wait(&mutex_);
+  }
   if (self.done) {
     return self.status;  // a leader wrote our batch as part of its group
   }
@@ -468,7 +473,7 @@ Status DBImpl::Write(const WriteOptions& options, const WriteBatch& batch) {
   Status status = background_error_;
   const Writer* last = &self;
   if (status.ok()) {
-    status = MakeRoomForWrite(lock);
+    status = MakeRoomForWrite();
   }
   if (status.ok()) {
     const Group group = BuildGroup();
@@ -485,7 +490,7 @@ Status DBImpl::Write(const WriteOptions& options, const WriteBatch& batch) {
 
     // The slow part runs without the mutex, so readers and newly arriving
     // writers aren't blocked; we are still the only writer (queue front).
-    lock.unlock();
+    lock.Unlock();
     bool log_touched = false;
     const std::uint64_t log_bytes_before = log_->BytesWritten();
     if (status.ok()) {
@@ -500,7 +505,7 @@ Status DBImpl::Write(const WriteOptions& options, const WriteBatch& batch) {
       // Checks the sequence range and applies all records or none.
       status = WriteBatchInternal::InsertInto(group_batch_, *memtable);
     }
-    lock.lock();
+    lock.Lock();
 
     stats_.log_bytes += log_bytes;  // appended, whatever happened next
     if (status.ok()) {
@@ -525,14 +530,14 @@ Status DBImpl::Write(const WriteOptions& options, const WriteBatch& batch) {
     if (member != &self) {
       member->status = status;
       member->done = true;
-      member->cv.notify_one();
+      member->cv.Signal();
     }
     if (member == last) {
       break;
     }
   }
   if (!writers_.empty()) {
-    writers_.front()->cv.notify_one();
+    writers_.front()->cv.Signal();
   }
   return status;
 }
@@ -562,22 +567,22 @@ DBImpl::Group DBImpl::BuildGroup() {
 }
 
 SequenceNumber DBImpl::LastSequence() {
-  const std::scoped_lock lock(mutex_);
+  const MutexLock lock(&mutex_);
   return last_sequence_;
 }
 
 std::uint64_t DBImpl::GroupsWrittenForTesting() {
-  const std::scoped_lock lock(mutex_);
+  const MutexLock lock(&mutex_);
   return groups_written_;
 }
 
 std::uint64_t DBImpl::FlushesForTesting() {
-  const std::scoped_lock lock(mutex_);
+  const MutexLock lock(&mutex_);
   return stats_.flushes;
 }
 
 std::shared_ptr<const Version> DBImpl::CurrentVersion() {
-  const std::scoped_lock lock(mutex_);
+  const MutexLock lock(&mutex_);
   return version_;
 }
 
@@ -590,7 +595,7 @@ void AddStall(StallStats& stall, std::chrono::steady_clock::time_point start) {
 
 }  // namespace
 
-Status DBImpl::MakeRoomForWrite(std::unique_lock<std::mutex>& lock, bool force) {
+Status DBImpl::MakeRoomForWrite(bool force) {
   bool delayed = false;
   while (true) {
     if (!background_error_.ok()) {
@@ -601,9 +606,9 @@ Status DBImpl::MakeRoomForWrite(std::unique_lock<std::mutex>& lock, bool force) 
       // Level 0 is filling up: give compaction a little time, once per write
       // (see "Write stalls" in db_impl.h).
       const auto start = std::chrono::steady_clock::now();
-      lock.unlock();
+      mutex_.Unlock();
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      lock.lock();
+      mutex_.Lock();
       AddStall(stats_.level0_slowdown, start);
       delayed = true;
       continue;
@@ -618,26 +623,28 @@ Status DBImpl::MakeRoomForWrite(std::unique_lock<std::mutex>& lock, bool force) 
       // for the background thread.
       const auto start = std::chrono::steady_clock::now();
       StallStats& stall = imm_ ? stats_.memtable_full : stats_.level0_stop;
-      done_cv_.wait(lock);
+      done_cv_.Wait(&mutex_);
       AddStall(stall, start);
       continue;
     }
-    FORGEDB_RETURN_IF_ERROR(SwitchMemtable(lock));
+    FORGEDB_RETURN_IF_ERROR(SwitchMemtable());
     if (synchronous_flush_) {
-      done_cv_.wait(lock, [this] { return BackgroundIdle(); });
+      while (!BackgroundIdle()) {
+        done_cv_.Wait(&mutex_);
+      }
       return background_error_;
     }
     return Status::OK();  // the new memtable is empty
   }
 }
 
-Status DBImpl::SwitchMemtable(std::unique_lock<std::mutex>& lock) {
+Status DBImpl::SwitchMemtable() {
   // Sync the old log first: writes in the new log must not survive a crash
   // that loses older, unsynced ones (recovery yields a prefix of the writes,
   // never a hole).
   const std::uint64_t old_log = log_number_;
   const std::uint64_t new_log = versions_->NewFileNumber();
-  lock.unlock();
+  mutex_.Unlock();
   Status status = log_file_->Sync();
   if (status.ok()) {
     status = log_file_->Close();
@@ -647,7 +654,7 @@ Status DBImpl::SwitchMemtable(std::unique_lock<std::mutex>& lock) {
     new_file = file_system_->NewWritableFile(LogFileName(name_, new_log));
     status = new_file.status();
   }
-  lock.lock();
+  mutex_.Lock();
   if (!status.ok()) {
     background_error_ = status;
     return status;
@@ -661,7 +668,7 @@ Status DBImpl::SwitchMemtable(std::unique_lock<std::mutex>& lock) {
   pending_flush_ = FlushJob{
       .memtable = imm_, .flushed_through = last_sequence_, .new_log = new_log, .old_log = old_log};
   flush_queued_.store(true);
-  work_cv_.notify_one();
+  work_cv_.Signal();
   return Status::OK();
 }
 
@@ -680,9 +687,11 @@ bool DBImpl::BackgroundIdle() const {
 }
 
 void DBImpl::BackgroundThread() {
-  std::unique_lock lock(mutex_);
+  const MutexLock lock(&mutex_);
   while (true) {
-    work_cv_.wait(lock, [this] { return shutting_down_ || HasBackgroundWork(); });
+    while (!shutting_down_ && !HasBackgroundWork()) {
+      work_cv_.Wait(&mutex_);
+    }
     if (shutting_down_) {
       return;  // a queued flush stays in the logs (see "Shutdown")
     }
@@ -695,29 +704,29 @@ void DBImpl::BackgroundThread() {
       manual_level_.reset();  // nothing more will run: answer the request
       manual_answered = true;
     } else if (pending_flush_) {
-      DoFlush(lock);  // flushes come first
+      DoFlush();  // flushes come first
     } else if (manual_level_) {
       const int level = manual_level_.value_or(0);
       std::optional<Compaction> compaction =
           CompactionForLevel(version_, level, compaction_pointers_);
       if (compaction) {
-        DoCompaction(lock, *compaction, /*manual=*/true);
+        DoCompaction(*compaction, /*manual=*/true);
       }
       manual_level_.reset();
       manual_answered = true;
     } else if (std::optional<Compaction> compaction =
                    compactions_paused_ ? std::nullopt
                                        : PickCompaction(version_, options_, compaction_pointers_)) {
-      DoCompaction(lock, *compaction, /*manual=*/false);
+      DoCompaction(*compaction, /*manual=*/false);
     }
-    DeleteObsoleteBackgroundFiles(lock);
+    DeleteObsoleteBackgroundFiles();
     busy_ = false;
     manual_done_ += manual_answered ? 1U : 0U;
-    done_cv_.notify_all();
+    done_cv_.SignalAll();
   }
 }
 
-void DBImpl::DoFlush(std::unique_lock<std::mutex>& lock) {
+void DBImpl::DoFlush() {
   if (!pending_flush_) {
     return;
   }
@@ -726,10 +735,10 @@ void DBImpl::DoFlush(std::unique_lock<std::mutex>& lock) {
   flush_queued_.store(false);
 
   const auto start = std::chrono::steady_clock::now();
-  lock.unlock();
+  mutex_.Unlock();
   std::uint64_t bytes_written = 0;
   const Status status = RunFlush(job, &bytes_written);
-  lock.lock();
+  mutex_.Lock();
 
   if (status.ok()) {
     version_ = versions_->Current();
@@ -747,7 +756,7 @@ void DBImpl::DoFlush(std::unique_lock<std::mutex>& lock) {
     // imm_ stays readable; its writes are still in the old log.
     background_error_ = status;
   }
-  done_cv_.notify_all();
+  done_cv_.SignalAll();
 }
 
 Status DBImpl::RunFlush(const FlushJob& job, std::uint64_t* bytes_written) {
@@ -765,24 +774,23 @@ Status DBImpl::RunFlush(const FlushJob& job, std::uint64_t* bytes_written) {
 }
 
 void DBImpl::FlushDuringCompaction() {
-  std::unique_lock lock(mutex_);
+  const MutexLock lock(&mutex_);
   if (pending_flush_ && background_error_.ok() && !shutting_down_) {
-    DoFlush(lock);
+    DoFlush();
   }
 }
 
-void DBImpl::DoCompaction(std::unique_lock<std::mutex>& lock, const Compaction& compaction,
-                          bool manual) {
+void DBImpl::DoCompaction(const Compaction& compaction, bool manual) {
   // Flushes run in the middle (FlushDuringCompaction) count as flush time,
   // not compaction time.
   const auto start = std::chrono::steady_clock::now();
   const std::uint64_t flush_microseconds = stats_.flush_microseconds;
-  lock.unlock();
+  mutex_.Unlock();
   bool abandoned = false;
   CompactionStats done;
   const Status status =
       RunCompaction(compaction, /*allow_trivial_move=*/!manual, &abandoned, &done);
-  lock.lock();
+  mutex_.Lock();
   if (status.ok()) {
     version_ = versions_->Current();
     DCheckVersion(*version_);
@@ -944,7 +952,7 @@ Status DBImpl::RunCompaction(const Compaction& compaction, bool allow_trivial_mo
   // again (ADR 0008).
   SequenceNumber smallest_snapshot = 0;
   {
-    const std::scoped_lock lock(mutex_);
+    const MutexLock lock(&mutex_);
     smallest_snapshot = snapshots_->Oldest().value_or(last_sequence_);
   }
 
@@ -1008,11 +1016,11 @@ void DBImpl::RecordEdit(const VersionEdit& edit) {
   }
 }
 
-void DBImpl::DeleteObsoleteBackgroundFiles(std::unique_lock<std::mutex>& lock) {
+void DBImpl::DeleteObsoleteBackgroundFiles() {
   if (deletable_tables_.empty() && logs_to_delete_.empty()) {
     return;
   }
-  lock.unlock();
+  mutex_.Unlock();
   // A table still listed by a version some read holds stays until a later
   // pass. If a removal fails, the next open deletes the file.
   const std::vector<std::uint64_t> live = versions_->LiveFiles();
@@ -1030,13 +1038,13 @@ void DBImpl::DeleteObsoleteBackgroundFiles(std::unique_lock<std::mutex>& lock) {
     static_cast<void>(file_system_->RemoveFile(LogFileName(name_, number)));
   }
   logs_to_delete_.clear();
-  lock.lock();
+  mutex_.Lock();
 }
 
 // --- Statistics and test hooks ----------------------------------------------------
 
 DBStats DBImpl::GetStats() {
-  const std::scoped_lock lock(mutex_);
+  const MutexLock lock(&mutex_);
   DBStats stats = stats_;
   for (std::size_t level = 0; level < stats.levels.size(); ++level) {
     const std::vector<FileMetaData>& files = version_->files.at(level);
@@ -1053,35 +1061,39 @@ std::optional<SequenceNumber> DBImpl::OldestSnapshotForTesting() const {
 }
 
 void DBImpl::SetSynchronousFlushForTesting(bool on) {
-  const std::scoped_lock lock(mutex_);
+  const MutexLock lock(&mutex_);
   synchronous_flush_ = on;
 }
 
 void DBImpl::WaitForFlushForTesting() {
-  std::unique_lock lock(mutex_);
-  done_cv_.wait(lock, [this] { return (!imm_ && !busy_) || !background_error_.ok(); });
+  const MutexLock lock(&mutex_);
+  while ((imm_ || busy_) && background_error_.ok()) {
+    done_cv_.Wait(&mutex_);
+  }
 }
 
 bool DBImpl::FlushPendingForTesting() {
-  const std::scoped_lock lock(mutex_);
+  const MutexLock lock(&mutex_);
   return static_cast<bool>(imm_);
 }
 
 void DBImpl::WaitForBackgroundWorkForTesting() {
-  std::unique_lock lock(mutex_);
-  done_cv_.wait(lock, [this] { return BackgroundIdle(); });
+  const MutexLock lock(&mutex_);
+  while (!BackgroundIdle()) {
+    done_cv_.Wait(&mutex_);
+  }
 }
 
 void DBImpl::SetCompactionsPausedForTesting(bool on) {
   {
-    const std::scoped_lock lock(mutex_);
+    const MutexLock lock(&mutex_);
     compactions_paused_ = on;
   }
-  work_cv_.notify_one();
+  work_cv_.Signal();
 }
 
 std::uint64_t DBImpl::CompactionsForTesting() {
-  const std::scoped_lock lock(mutex_);
+  const MutexLock lock(&mutex_);
   std::uint64_t compactions = 0;
   for (const LevelStats& level : stats_.levels) {
     compactions += level.compactions.count + level.compactions.trivial_moves;
@@ -1094,28 +1106,36 @@ Status DBImpl::FlushForTesting() {
   const WriteBatch nothing;
   Writer self(&nothing, false);
   self.force_flush = true;
-  std::unique_lock lock(mutex_);
+  const MutexLock lock(&mutex_);
   writers_.push_back(&self);
-  self.cv.wait(lock, [&] { return &self == writers_.front(); });
-  Status status = MakeRoomForWrite(lock, /*force=*/true);
+  while (&self != writers_.front()) {
+    self.cv.Wait(&mutex_);
+  }
+  Status status = MakeRoomForWrite(/*force=*/true);
   writers_.pop_front();
   if (!writers_.empty()) {
-    writers_.front()->cv.notify_one();
+    writers_.front()->cv.Signal();
   }
   if (status.ok()) {
-    done_cv_.wait(lock, [this] { return BackgroundIdle(); });
+    while (!BackgroundIdle()) {
+      done_cv_.Wait(&mutex_);
+    }
     status = background_error_;
   }
   return status;
 }
 
 Status DBImpl::CompactLevelForTesting(int level) {
-  std::unique_lock lock(mutex_);
-  done_cv_.wait(lock, [this] { return !manual_level_.has_value(); });
+  const MutexLock lock(&mutex_);
+  while (manual_level_.has_value()) {
+    done_cv_.Wait(&mutex_);
+  }
   manual_level_ = level;
   const std::uint64_t ticket = manual_done_ + 1;
-  work_cv_.notify_one();
-  done_cv_.wait(lock, [&] { return manual_done_ >= ticket || shutting_down_; });
+  work_cv_.Signal();
+  while (manual_done_ < ticket && !shutting_down_) {
+    done_cv_.Wait(&mutex_);
+  }
   return background_error_;
 }
 
@@ -1127,12 +1147,12 @@ Status DBImpl::CompactAllForTesting() {
     }
   }
   WaitForBackgroundWorkForTesting();
-  const std::scoped_lock lock(mutex_);
+  const MutexLock lock(&mutex_);
   return background_error_;
 }
 
 std::shared_ptr<const Snapshot> DBImpl::GetSnapshot() {
-  const std::scoped_lock lock(mutex_);
+  const MutexLock lock(&mutex_);
   return std::make_shared<const SnapshotImpl>(snapshots_, last_sequence_);
 }
 
@@ -1145,7 +1165,7 @@ Result<DBImpl::ReadView> DBImpl::CurrentReadView(const ReadOptions& options) {
     }
     snapshot_sequence = snapshot->Sequence();
   }
-  const std::scoped_lock lock(mutex_);
+  const MutexLock lock(&mutex_);
   return ReadView{.memtable = mem_,
                   .immutable = imm_,
                   .version = version_,
