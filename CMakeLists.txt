@@ -12,12 +12,17 @@ cmake_minimum_required(VERSION 3.25)
 option(FORGEDB_BUILD_TESTS "Build the GoogleTest suites (vcpkg feature 'tests')" ON)
 option(FORGEDB_BUILD_BENCH "Build the Google Benchmark microbenchmarks (vcpkg feature 'microbench')" OFF)
 option(FORGEDB_BUILD_FUZZ "Build the libFuzzer targets (clang-cl with FORGEDB_SANITIZE=fuzzer)" OFF)
+option(FORGEDB_BENCH_ENGINES
+  "Build forgedb_bench with RocksDB, LevelDB and SQLite too (vcpkg feature 'bench'; the msvc-bench preset)" OFF)
 
 if(FORGEDB_BUILD_TESTS)
   list(APPEND VCPKG_MANIFEST_FEATURES "tests")
 endif()
 if(FORGEDB_BUILD_BENCH)
   list(APPEND VCPKG_MANIFEST_FEATURES "microbench")
+endif()
+if(FORGEDB_BENCH_ENGINES)
+  list(APPEND VCPKG_MANIFEST_FEATURES "bench")
 endif()
 
 project(ForgeDB

@@ -1,7 +1,7 @@
 // Engine: what forgedb_bench needs from a key-value store (TODO 5.1). Every
 // workload runs through this interface, so each engine runs the same code;
-// an adapter per engine translates (ForgeDB here; RocksDB, LevelDB and
-// SQLite in 5.1b).
+// an adapter per engine translates (forgedb_engine.h; rocksdb_engine.h,
+// leveldb_engine.h and sqlite_engine.h in builds with FORGEDB_BENCH_ENGINES).
 //
 // Engines are opened by an EngineFactory, which also says where their files
 // are and how to remove them, so tests can run everything on an in-memory
@@ -22,10 +22,13 @@
 
 namespace forgedb::bench {
 
-// The settings every engine gets (each maps them to its own).
+// The settings every engine gets; each adapter maps them to its own options
+// (its header says how) and leaves the rest at the engine's defaults. No
+// engine compresses.
 struct EngineOptions {
   bool sync = false;              // every write is synced before it returns
   std::uint64_t cache_bytes = 0;  // block cache
+  std::uint64_t memtable_bytes = std::uint64_t{4} << 20U;  // write buffer before a flush
   int bloom_bits_per_key = 10;
 };
 
@@ -75,7 +78,20 @@ class EngineFactory {
   [[nodiscard]] virtual bool RealFiles() const = 0;
 };
 
-// ForgeDB on the Windows file system, in folders on disk (forgedb_bench).
-[[nodiscard]] std::unique_ptr<EngineFactory> NewDiskEngineFactory();
+// Opens a new database of one engine in folder `dir` on disk (the folder's
+// parent exists).
+using DiskEngineOpener = Result<std::unique_ptr<Engine>> (*)(const std::filesystem::path& dir,
+                                                             const EngineOptions& options);
+struct DiskEngine {
+  std::string name;
+  DiskEngineOpener open;
+};
+
+// The engines in `engines`, in folders on disk (forgedb_bench). RealFiles()
+// is true; folders are created and removed with std::filesystem.
+[[nodiscard]] std::unique_ptr<EngineFactory> NewDiskEngineFactory(std::vector<DiskEngine> engines);
+
+// The total size of the files in folder `dir` (not its subfolders).
+[[nodiscard]] Result<std::uint64_t> FolderBytes(const std::filesystem::path& dir);
 
 }  // namespace forgedb::bench

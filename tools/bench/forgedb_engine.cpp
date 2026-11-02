@@ -7,7 +7,6 @@
 #include <memory>
 #include <string>
 #include <string_view>
-#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -99,8 +98,7 @@ class ForgeDBEngine final : public Engine {
 
 class ForgeDBFactory final : public EngineFactory {
  public:
-  ForgeDBFactory(std::shared_ptr<FileSystem> fs, bool real_files)
-      : fs_(std::move(fs)), real_files_(real_files) {}
+  explicit ForgeDBFactory(std::shared_ptr<FileSystem> fs) : fs_(std::move(fs)) {}
 
   [[nodiscard]] std::vector<std::string> Engines() const override { return {"forgedb"}; }
 
@@ -113,13 +111,6 @@ class ForgeDBFactory final : public EngineFactory {
   }
 
   Status Remove(const std::filesystem::path& dir) override {
-    if (real_files_) {
-      // The FileSystem has no directory removal; std::filesystem does it.
-      std::error_code error;
-      std::filesystem::remove_all(dir, error);
-      return error ? Status::IOError("removing " + dir.generic_string(), error.message())
-                   : Status::OK();
-    }
     Result<std::vector<std::string>> children = fs_->GetChildren(dir);
     if (!children.ok()) {
       return Status::OK();  // nothing there
@@ -130,21 +121,12 @@ class ForgeDBFactory final : public EngineFactory {
     return Status::OK();
   }
 
-  Status CreateRoot(const std::filesystem::path& dir) override {
-    if (real_files_) {
-      std::error_code error;
-      std::filesystem::create_directories(dir, error);
-      return error ? Status::IOError("creating " + dir.generic_string(), error.message())
-                   : Status::OK();
-    }
-    return fs_->CreateDir(dir);
-  }
+  Status CreateRoot(const std::filesystem::path& dir) override { return fs_->CreateDir(dir); }
 
-  [[nodiscard]] bool RealFiles() const override { return real_files_; }
+  [[nodiscard]] bool RealFiles() const override { return false; }
 
  private:
   std::shared_ptr<FileSystem> fs_;
-  bool real_files_;
 };
 
 }  // namespace
@@ -154,18 +136,20 @@ Result<std::unique_ptr<Engine>> OpenForgeDB(std::shared_ptr<FileSystem> fs,
                                             const EngineOptions& options) {
   Options db_options;
   db_options.block_cache_bytes = static_cast<std::size_t>(options.cache_bytes);
+  db_options.memtable_bytes = static_cast<std::size_t>(options.memtable_bytes);
   db_options.filter_bits_per_key = options.bloom_bits_per_key;
   FORGEDB_ASSIGN_OR_RETURN(std::unique_ptr<DB> db, OpenDB(db_options, dir, fs));
   return std::unique_ptr<Engine>(
       std::make_unique<ForgeDBEngine>(std::move(db), std::move(fs), dir, options.sync));
 }
 
-std::unique_ptr<EngineFactory> NewForgeDBFactory(std::shared_ptr<FileSystem> fs, bool real_files) {
-  return std::make_unique<ForgeDBFactory>(std::move(fs), real_files);
+Result<std::unique_ptr<Engine>> OpenForgeDBOnDisk(const std::filesystem::path& dir,
+                                                  const EngineOptions& options) {
+  return OpenForgeDB(std::make_shared<WinFileSystem>(), dir, options);
 }
 
-std::unique_ptr<EngineFactory> NewDiskEngineFactory() {
-  return NewForgeDBFactory(std::make_shared<WinFileSystem>(), /*real_files=*/true);
+std::unique_ptr<EngineFactory> NewForgeDBFactory(std::shared_ptr<FileSystem> fs) {
+  return std::make_unique<ForgeDBFactory>(std::move(fs));
 }
 
 }  // namespace forgedb::bench

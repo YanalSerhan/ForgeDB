@@ -160,6 +160,7 @@ ctest --preset msvc-debug
 | `clangcl-tidy`  | clang-cl | Debug          | clang-tidy on every file; build only    |
 | `msvc-analyze`  | MSVC     | Debug          | `/analyze` on the library; build only   |
 | `clangcl-fuzz`  | clang-cl | RelWithDebInfo | libFuzzer + ASan; library and fuzz targets; `ctest` runs a 60 s fuzz smoke test per target |
+| `msvc-bench`    | MSVC     | Release        | `forgedb_bench` with RocksDB, LevelDB and SQLite too; `ctest` runs only the benchmark tool's tests. Not in `build-all.ps1`'s default list or CI; the first configure builds RocksDB through vcpkg (tens of minutes) |
 
 Build output goes to `out/build/<preset>/`. Microbenchmarks (release preset only):
 `out\build\msvc-release\bench\forgedb_microbench.exe`.
@@ -217,11 +218,13 @@ forgedb_cli <db-dir> delete <key>
 forgedb_cli <db-dir> scan [--from <key>] [--limit <n>]
 forgedb_cli <db-dir> stats                 tables per level, last sequence, statistics, recovery
 
-forgedb_bench [--workloads=...] [--num=1000000] [--value_size=100] [--sync=1] [--threads=N]
-              [--runs=5] [--json=results.json] ...
+forgedb_bench [--engine=forgedb,rocksdb,leveldb,sqlite] [--workloads=...] [--num=1000000]
+              [--value_size=100] [--sync=1] [--threads=N] [--runs=5] [--json=results.json] ...
     fillseq, fillrandom, overwrite, readrandom, readmissing, readseq, seekrandom, mixed:
     ops/s, MB/s, latency p50/p99/max, write and space amplification; reads check their
-    answers. Only meaningful from msvc-release (tools/bench/bench_options.h lists every option).
+    answers. Only meaningful from a release build (tools/bench/bench_options.h lists every
+    option). RocksDB, LevelDB and SQLite only in the msvc-bench build; how each engine's
+    settings are matched: tools/bench/*_engine.h.
 ```
 
 Every `forgedb_cli` command opens the database and so runs recovery: writes left in the log

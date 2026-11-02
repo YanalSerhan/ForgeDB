@@ -375,8 +375,10 @@ Result<RunResult> RunWorkload(EngineFactory& factory, std::string_view engine,
   const std::filesystem::path dir =
       root / (std::string(engine) + "-" + std::string(workload) + "-" + std::to_string(run));
   FORGEDB_RETURN_IF_ERROR(factory.Remove(dir));
-  const EngineOptions engine_options{
-      .sync = options.sync, .cache_bytes = options.cache_mb << 20U, .bloom_bits_per_key = 10};
+  const EngineOptions engine_options{.sync = options.sync,
+                                     .cache_bytes = options.cache_mb << 20U,
+                                     .memtable_bytes = options.memtable_mb << 20U,
+                                     .bloom_bits_per_key = 10};
   RunResult result;
   result.engine = std::string(engine);
   result.workload = std::string(workload);
@@ -464,8 +466,8 @@ std::string ResultsJson(const BenchOptions& options, std::span<const RunResult> 
   for (const auto& [name, value] :
        {std::pair{"num", options.num}, std::pair{"key_size", options.key_size},
         std::pair{"value_size", options.value_size}, std::pair{"threads", options.threads},
-        std::pair{"cache_mb", options.cache_mb}, std::pair{"runs", options.runs},
-        std::pair{"seed", options.seed}}) {
+        std::pair{"cache_mb", options.cache_mb}, std::pair{"memtable_mb", options.memtable_mb},
+        std::pair{"runs", options.runs}, std::pair{"seed", options.seed}}) {
     json.Key(name);
     json.Number(value);
   }
@@ -473,6 +475,8 @@ std::string ResultsJson(const BenchOptions& options, std::span<const RunResult> 
   json.Bool(options.sync);
   json.Key("bloom_bits_per_key");
   json.Number(std::uint64_t{10});
+  json.Key("compression");
+  json.String("none");
   json.EndObject();
 
   json.Key("results");

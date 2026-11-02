@@ -71,7 +71,7 @@ struct NumericOption {
   std::uint64_t high;
 };
 
-constexpr std::array<NumericOption, 7> kNumericOptions = {{
+constexpr std::array<NumericOption, 8> kNumericOptions = {{
     {.name = "num", .field = &BenchOptions::num, .low = 1, .high = std::uint64_t{1} << 40U},
     {.name = "key_size", .field = &BenchOptions::key_size, .low = 8, .high = kMaxKeySize},
     {.name = "value_size",
@@ -83,6 +83,7 @@ constexpr std::array<NumericOption, 7> kNumericOptions = {{
      .field = &BenchOptions::cache_mb,
      .low = 0,
      .high = std::uint64_t{1} << 20U},
+    {.name = "memtable_mb", .field = &BenchOptions::memtable_mb, .low = 1, .high = 1024},
     {.name = "runs", .field = &BenchOptions::runs, .low = 1, .high = 1000},
     {.name = "seed", .field = &BenchOptions::seed, .low = 0, .high = UINT64_MAX},
 }};
@@ -132,7 +133,7 @@ std::string BenchUsage(std::span<const std::string> known_engines) {
          workloads +
          "\n"
          "  --num=1000000  --key_size=16  --value_size=100  --sync=0  --threads=1\n"
-         "  --cache_mb=8  --runs=1  --seed=1  --db=<dir>  --json=<file>\n";
+         "  --cache_mb=8  --memtable_mb=4  --runs=1  --seed=1  --db=<dir>  --json=<file>\n";
 }
 
 Result<BenchOptions> ParseBenchOptions(std::span<const std::string> args,

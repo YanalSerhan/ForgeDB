@@ -84,6 +84,11 @@ TEST(ToolUtilTest, PathFromUtf8KeepsNonAsciiNames) {
   EXPECT_TRUE(path.filename().u8string() == u8"caf\u00e9.sst");
 }
 
+TEST(ToolUtilTest, PathToUtf8IsTheInverse) {
+  const std::string name = "dir/caf\xC3\xA9/\xE6\x97\xA5.sqlite";
+  EXPECT_EQ(PathToUtf8(PathFromUtf8(name)), name);
+}
+
 // --- forgedb_sst_dump ---------------------------------------------------------------
 
 std::string Key(int i) { return "key" + std::to_string(1000 + i); }

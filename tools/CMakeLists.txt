@@ -9,9 +9,11 @@
 add_library(forgedb_tools STATIC
   bench/bench.cpp
   bench/bench_options.cpp
+  bench/disk_engines.cpp
   bench/forgedb_engine.cpp
   bench/histogram.cpp
   bench/json_writer.cpp
+  bench/leveldb_properties.cpp
   cli.cpp
   sst_dump.cpp
   tool_util.cpp
@@ -31,3 +33,23 @@ endforeach()
 add_executable(forgedb_bench bench/bench_main.cpp)
 target_link_libraries(forgedb_bench PRIVATE forgedb_tools)
 forgedb_target_defaults(forgedb_bench)
+
+# The other engines (TODO 5.1b), from vcpkg's 'bench' feature: only with
+# FORGEDB_BENCH_ENGINES (the msvc-bench preset), so no other build needs them.
+if(FORGEDB_BENCH_ENGINES)
+  find_package(RocksDB CONFIG REQUIRED)
+  find_package(leveldb CONFIG REQUIRED)
+  find_package(unofficial-sqlite3 CONFIG REQUIRED)
+  add_library(forgedb_bench_engines STATIC
+    bench/leveldb_engine.cpp
+    bench/rocksdb_engine.cpp
+    bench/sqlite_engine.cpp
+  )
+  target_link_libraries(forgedb_bench_engines
+    PUBLIC forgedb_tools
+    PRIVATE RocksDB::rocksdb leveldb::leveldb unofficial::sqlite3::sqlite3)
+  forgedb_target_defaults(forgedb_bench_engines)
+
+  target_link_libraries(forgedb_bench PRIVATE forgedb_bench_engines)
+  target_compile_definitions(forgedb_bench PRIVATE FORGEDB_BENCH_ENGINES)
+endif()

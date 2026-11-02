@@ -30,6 +30,9 @@ namespace forgedb::tools {
 // A path from a UTF-8 string (the tools take their arguments as UTF-8).
 [[nodiscard]] std::filesystem::path PathFromUtf8(std::string_view utf8);
 
+// A path as a UTF-8 string.
+[[nodiscard]] std::string PathToUtf8(const std::filesystem::path& path);
+
 // A decimal number with no sign, spaces or overflow; nullopt otherwise.
 [[nodiscard]] std::optional<std::uint64_t> ParseUnsigned(std::string_view text) noexcept;
 

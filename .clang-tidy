@@ -17,6 +17,10 @@
 #   cppcoreguidelines-pro-bounds-avoid-unchecked-container-access
 #                                            bans [] on std::array/string_view; the alternative
 #                                            .at() throws. Indices are masked or checked first
+#   clang-analyzer-optin.core.EnumCastOutOfRange
+#                                            opt-in in clang because it misfires on bit-flag
+#                                            enums: it rejects MSVC's own std::filesystem flags
+#                                            (_File_size | _Follow_symlinks) inside <filesystem>
 Checks: >
   -*,
   bugprone-*,
@@ -38,7 +42,8 @@ Checks: >
   -modernize-use-trailing-return-type,
   -readability-identifier-length,
   -portability-avoid-pragma-once,
-  -cppcoreguidelines-pro-bounds-avoid-unchecked-container-access
+  -cppcoreguidelines-pro-bounds-avoid-unchecked-container-access,
+  -clang-analyzer-optin.core.EnumCastOutOfRange
 WarningsAsErrors: '*'
 HeaderFilterRegex: '.*[/\\](include[/\\]forgedb|src|tests|tools|fuzz|bench)[/\\].*'
 FormatStyle: file

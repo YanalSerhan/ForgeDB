@@ -171,6 +171,19 @@ add_test(NAME ForgeDBBench.EveryWorkloadOnRealFiles
   COMMAND forgedb_bench --num=2000 --threads=2
           "--json=${CMAKE_CURRENT_BINARY_DIR}/forgedb_bench_smoke.json")
 
+# The other engines (TODO 5.1b; FORGEDB_BENCH_ENGINES, the msvc-bench preset):
+# the adapters' tests, and the same smoke run with all four engines.
+if(FORGEDB_BENCH_ENGINES)
+  add_executable(forgedb_bench_engine_tests bench/engines_test.cpp)
+  target_link_libraries(forgedb_bench_engine_tests PRIVATE forgedb_bench_engines GTest::gtest_main)
+  forgedb_target_defaults(forgedb_bench_engine_tests)
+  gtest_discover_tests(forgedb_bench_engine_tests DISCOVERY_MODE PRE_TEST)
+
+  add_test(NAME ForgeDBBench.AllEnginesOnRealFiles
+    COMMAND forgedb_bench --engine=forgedb,rocksdb,leveldb,sqlite --num=2000 --threads=2
+            "--json=${CMAKE_CURRENT_BINARY_DIR}/forgedb_bench_all_engines.json")
+endif()
+
 # Thread-safety canary (clang-cl only; ADR 0009): a file that touches a
 # FORGEDB_GUARDED_BY member without its mutex. The test passes only if the
 # compiler rejects it with the analysis's message, which proves the analysis

@@ -74,6 +74,12 @@
       "cacheVariables": { "FORGEDB_ENABLE_MSVC_ANALYZE": "ON" }
     },
     {
+      "name": "msvc-bench",
+      "displayName": "MSVC Release + RocksDB, LevelDB and SQLite in forgedb_bench (not in build-all's default list or CI)",
+      "inherits": ["cfg-release", "msvc"],
+      "cacheVariables": { "FORGEDB_BENCH_ENGINES": "ON" }
+    },
+    {
       "name": "clangcl-fuzz",
       "displayName": "clang-cl libFuzzer + ASan",
       "inherits": "clangcl",
@@ -94,7 +100,8 @@
     { "name": "clangcl-asan", "configurePreset": "clangcl-asan" },
     { "name": "clangcl-tidy", "configurePreset": "clangcl-tidy" },
     { "name": "msvc-analyze", "configurePreset": "msvc-analyze" },
-    { "name": "clangcl-fuzz", "configurePreset": "clangcl-fuzz" }
+    { "name": "clangcl-fuzz", "configurePreset": "clangcl-fuzz" },
+    { "name": "msvc-bench", "configurePreset": "msvc-bench" }
   ],
   "testPresets": [
     {
@@ -108,6 +115,13 @@
     { "name": "msvc-asan", "inherits": "test-base", "configurePreset": "msvc-asan" },
     { "name": "clangcl-debug", "inherits": "test-base", "configurePreset": "clangcl-debug" },
     { "name": "clangcl-asan", "inherits": "test-base", "configurePreset": "clangcl-asan" },
-    { "name": "clangcl-fuzz", "inherits": "test-base", "configurePreset": "clangcl-fuzz" }
+    { "name": "clangcl-fuzz", "inherits": "test-base", "configurePreset": "clangcl-fuzz" },
+    {
+      "name": "msvc-bench",
+      "displayName": "The benchmark tool's tests only (the rest are msvc-release's)",
+      "inherits": "test-base",
+      "configurePreset": "msvc-bench",
+      "filter": { "include": { "name": "Bench|LevelDB|DiskEngine" } }
+    }
   ]
 }

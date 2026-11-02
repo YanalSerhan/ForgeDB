@@ -14,8 +14,12 @@
       "dependencies": [ "benchmark" ]
     },
     "bench": {
-      "description": "Comparison engines for tools/forgedb_bench (Phase 5)",
-      "dependencies": [ "leveldb", "rocksdb", "sqlite3" ]
+      "description": "Comparison engines for tools/forgedb_bench (CMake: FORGEDB_BENCH_ENGINES)",
+      "dependencies": [
+        { "name": "leveldb", "features": [ "crc32c" ] },
+        { "name": "rocksdb", "default-features": false },
+        "sqlite3"
+      ]
     }
   }
 }

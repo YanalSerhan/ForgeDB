@@ -9,6 +9,7 @@
 //   --sync=0                  1: every write is synced before it returns
 //   --threads=1               threads running each workload's operations
 //   --cache_mb=8              block cache, MiB (same for every engine)
+//   --memtable_mb=4           write buffer, MiB (same for every engine)
 //   --runs=1                  times each workload runs, on a fresh database
 //   --seed=1                  for keys and values
 //   --db=<dir>                where the databases go (default: a new folder in %TEMP%)
@@ -52,6 +53,7 @@ struct BenchOptions {
   bool sync = false;
   std::uint64_t threads = 1;
   std::uint64_t cache_mb = 8;
+  std::uint64_t memtable_mb = 4;
   std::uint64_t runs = 1;
   std::uint64_t seed = 1;
   std::optional<std::filesystem::path> db;

@@ -68,6 +68,11 @@ std::filesystem::path PathFromUtf8(std::string_view utf8) {
   return {std::u8string(utf8.begin(), utf8.end())};
 }
 
+std::string PathToUtf8(const std::filesystem::path& path) {
+  const std::u8string utf8 = path.u8string();
+  return {utf8.begin(), utf8.end()};
+}
+
 std::optional<std::uint64_t> ParseUnsigned(std::string_view text) noexcept {
   if (text.empty()) {
     return std::nullopt;

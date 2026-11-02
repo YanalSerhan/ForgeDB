@@ -1,8 +1,11 @@
 // forgedb_bench (TODO 5.1; tools/bench/): the latency histogram, the JSON
-// writer, option parsing, and whole runs on an in-memory file system,
-// including that a wrong answer from an engine fails the run.
+// writer, option parsing, reading LevelDB's properties, the disk engine
+// factory, and whole runs on an in-memory file system, including that a wrong
+// answer from an engine fails the run. The RocksDB, LevelDB and SQLite
+// adapters themselves are tested in tests/bench/engines_test.cpp (msvc-bench).
 #include "tools/bench/bench.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -32,6 +35,7 @@
 #include "tools/bench/forgedb_engine.h"
 #include "tools/bench/histogram.h"
 #include "tools/bench/json_writer.h"
+#include "tools/bench/leveldb_properties.h"
 
 namespace forgedb::bench {
 namespace {
@@ -135,11 +139,13 @@ TEST(BenchOptionsTest, DefaultsAndEveryOption) {
   EXPECT_EQ(defaults->value_size, 100U);
   EXPECT_EQ(defaults->workloads.size(), kWorkloads.size());
   EXPECT_FALSE(defaults->sync);
+  EXPECT_EQ(defaults->cache_mb, 8U);
+  EXPECT_EQ(defaults->memtable_mb, 4U);
 
   const Result<BenchOptions> all =
       Parse({"--engine=forgedb", "--workloads=readrandom,fillseq", "--num=5000", "--key_size=20",
-             "--value_size=1024", "--sync=1", "--threads=4", "--cache_mb=64", "--runs=5",
-             "--seed=7", "--db=somewhere", "--json=out.json"});
+             "--value_size=1024", "--sync=1", "--threads=4", "--cache_mb=64", "--memtable_mb=16",
+             "--runs=5", "--seed=7", "--db=somewhere", "--json=out.json"});
   ASSERT_TRUE(all.ok()) << all.status().ToString();
   EXPECT_EQ(all->workloads, (std::vector<std::string>{"readrandom", "fillseq"}));
   EXPECT_EQ(all->num, 5000U);
@@ -148,6 +154,7 @@ TEST(BenchOptionsTest, DefaultsAndEveryOption) {
   EXPECT_TRUE(all->sync);
   EXPECT_EQ(all->threads, 4U);
   EXPECT_EQ(all->cache_mb, 64U);
+  EXPECT_EQ(all->memtable_mb, 16U);
   EXPECT_EQ(all->runs, 5U);
   EXPECT_EQ(all->seed, 7U);
   EXPECT_EQ(all->db, std::filesystem::path("somewhere"));
@@ -168,7 +175,155 @@ TEST(BenchOptionsTest, ProblemsAreNamed) {
             std::string::npos);
   EXPECT_NE(problem({"--engine=rocksdb"}).find("unknown engine 'rocksdb'"), std::string::npos);
   EXPECT_NE(problem({"--sync=2"}).find("--sync"), std::string::npos);
+  EXPECT_NE(problem({"--memtable_mb=0"}).find("--memtable_mb must be a number from 1 to 1024"),
+            std::string::npos);
   EXPECT_NE(problem({"--num=100000000", "--key_size=8"}).find("too short"), std::string::npos);
+}
+
+// --- LevelDB's properties ----------------------------------------------------------
+
+// "leveldb.sstables" as LevelDB prints it (Version::DebugString).
+constexpr std::string_view kSstables =
+    "--- level 0 ---\n"
+    " 12:1048600['00000000000000000002' @ 9 : 1 .. '00000000000000000998' @ 400 : 1]\n"
+    " 14:2000['k' @ 401 : 1 .. 'k\\x00\\xff' @ 402 : 0]\n"
+    "--- level 1 ---\n"
+    " 9:5242880['a' @ 1 : 1 .. 'b' @ 2 : 1]\n"
+    "--- level 2 ---\n"
+    "--- level 3 ---\n"
+    " 7:52428800['c' @ 3 : 1 .. 'd' @ 4 : 1]\n"
+    "--- level 4 ---\n"
+    "--- level 5 ---\n"
+    "--- level 6 ---\n"
+    " 3:99['e' @ 5 : 1 .. 'f' @ 6 : 1]\n";
+
+TEST(LevelDBPropertiesTest, TablesPerLevel) {
+  const Result<LevelDBTables> tables = ParseLevelDBTables(kSstables);
+  ASSERT_TRUE(tables.ok()) << tables.status().ToString();
+  EXPECT_EQ(tables->files, (std::array<std::uint64_t, kLevelDBLevels>{2, 1, 0, 1, 0, 0, 1}));
+  EXPECT_EQ(tables->bytes,
+            (std::array<std::uint64_t, kLevelDBLevels>{1050600, 5242880, 0, 52428800, 0, 0, 99}));
+
+  const Result<LevelDBTables> empty = ParseLevelDBTables(
+      "--- level 0 ---\n--- level 1 ---\n--- level 2 ---\n--- level 3 ---\n"
+      "--- level 4 ---\n--- level 5 ---\n--- level 6 ---\n");
+  ASSERT_TRUE(empty.ok()) << empty.status().ToString();
+  EXPECT_EQ(empty->files, (std::array<std::uint64_t, kLevelDBLevels>{}));
+}
+
+TEST(LevelDBPropertiesTest, MalformedTablesAreCorruption) {
+  for (const std::string_view text :
+       {std::string_view(" 12:100['a' .. 'b']\n"),            // a file before any level
+        std::string_view("--- level 7 ---\n"),                // no such level
+        std::string_view("--- level 0 ---\n 12:big['a']\n"),  // size not a number
+        std::string_view("--- level 0 ---\nsomething else\n")}) {
+    const Result<LevelDBTables> tables = ParseLevelDBTables(text);
+    ASSERT_FALSE(tables.ok()) << text;
+    EXPECT_EQ(tables.status().code(), Status::Code::kCorruption) << text;
+  }
+}
+
+TEST(LevelDBPropertiesTest, CompactionScoreIsLevelDBs) {
+  LevelDBTables tables;
+  EXPECT_DOUBLE_EQ(LevelDBCompactionScore(tables), 0.0);
+  tables.files[0] = 3;
+  EXPECT_DOUBLE_EQ(LevelDBCompactionScore(tables), 0.75);
+  tables.files[0] = 4;  // the level-0 trigger
+  EXPECT_DOUBLE_EQ(LevelDBCompactionScore(tables), 1.0);
+  tables.files[0] = 0;
+  tables.bytes[1] = std::uint64_t{5} << 20U;  // half of level 1's 10 MiB
+  EXPECT_DOUBLE_EQ(LevelDBCompactionScore(tables), 0.5);
+  tables.bytes[3] = std::uint64_t{1500} << 20U;  // level 3 holds 1,000 MiB
+  EXPECT_DOUBLE_EQ(LevelDBCompactionScore(tables), 1.5);
+  tables.bytes[3] = 0;
+  tables.bytes[6] = std::uint64_t{1} << 40U;  // the last level never scores
+  EXPECT_DOUBLE_EQ(LevelDBCompactionScore(tables), 0.5);
+  EXPECT_DOUBLE_EQ(LevelDBCompactionScore(*ParseLevelDBTables(kSstables)), 0.5);
+}
+
+TEST(LevelDBPropertiesTest, CompactionTotals) {
+  // "leveldb.stats" as LevelDB prints it (DBImpl::GetProperty).
+  const Result<LevelDBCompactionStats> stats = ParseLevelDBStats(
+      "                               Compactions\n"
+      "Level  Files Size(MB) Time(sec) Read(MB) Write(MB)\n"
+      "--------------------------------------------------\n"
+      "  0        2        4         1        0        36\n"
+      "  1        5       10         3       60        58\n"
+      "  2       40       80         2       30        29\n");
+  ASSERT_TRUE(stats.ok()) << stats.status().ToString();
+  EXPECT_DOUBLE_EQ(stats->seconds, 6.0);
+  EXPECT_DOUBLE_EQ(stats->read_mb, 90.0);
+  EXPECT_DOUBLE_EQ(stats->write_mb, 123.0);
+
+  const Result<LevelDBCompactionStats> none = ParseLevelDBStats(
+      "                               Compactions\n"
+      "Level  Files Size(MB) Time(sec) Read(MB) Write(MB)\n"
+      "--------------------------------------------------\n");
+  ASSERT_TRUE(none.ok()) << none.status().ToString();
+  EXPECT_DOUBLE_EQ(none->write_mb, 0.0);
+
+  EXPECT_FALSE(ParseLevelDBStats("no table here").ok());
+  EXPECT_FALSE(ParseLevelDBStats("--------------------------------------------------\n"
+                                 "  0        2        4         1\n")
+                   .ok());
+}
+
+// --- The disk engine factory --------------------------------------------------------
+
+Result<std::unique_ptr<Engine>> OpenNothing(const std::filesystem::path& dir,
+                                            const EngineOptions& /*options*/) {
+  return Status::NotSupported("not an engine", dir.filename().generic_string());
+}
+
+std::filesystem::path FreshFolder(std::string_view name) {
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() / name;
+  std::filesystem::remove_all(dir);
+  return dir;
+}
+
+void WriteFile(const std::filesystem::path& path, std::string_view contents) {
+  std::ofstream file(path, std::ios::binary);
+  file << contents;
+}
+
+TEST(DiskEngineFactoryTest, OpensByNameAndManagesFolders) {
+  const auto factory = NewDiskEngineFactory(
+      {{.name = "first", .open = OpenNothing}, {.name = "second", .open = OpenNothing}});
+  EXPECT_EQ(factory->Engines(), (std::vector<std::string>{"first", "second"}));
+  EXPECT_TRUE(factory->RealFiles());
+
+  const std::filesystem::path root = FreshFolder("forgedb_disk_factory_test") / "a" / "b";
+  ASSERT_TRUE(factory->CreateRoot(root).ok());
+  EXPECT_TRUE(std::filesystem::is_directory(root));
+
+  const Result<std::unique_ptr<Engine>> second = factory->Open("second", root / "db", {});
+  ASSERT_FALSE(second.ok());
+  EXPECT_EQ(second.status().code(), Status::Code::kNotSupported) << "the opener was called";
+  const Result<std::unique_ptr<Engine>> unknown = factory->Open("third", root / "db", {});
+  ASSERT_FALSE(unknown.ok());
+  EXPECT_EQ(unknown.status().code(), Status::Code::kInvalidArgument);
+
+  WriteFile(root / "file", "data");
+  ASSERT_TRUE(factory->Remove(root).ok());
+  EXPECT_FALSE(std::filesystem::exists(root));
+  EXPECT_TRUE(factory->Remove(root).ok()) << "removing what is not there is fine";
+  std::filesystem::remove_all(root.parent_path().parent_path());
+}
+
+TEST(DiskEngineFactoryTest, FolderBytesCountsTheFilesInTheFolder) {
+  const std::filesystem::path dir = FreshFolder("forgedb_folder_bytes_test");
+  EXPECT_FALSE(FolderBytes(dir).ok()) << "no folder";
+  std::filesystem::create_directories(dir / "sub");
+  const Result<std::uint64_t> none = FolderBytes(dir);
+  ASSERT_TRUE(none.ok()) << none.status().ToString();
+  EXPECT_EQ(*none, 0U);
+  WriteFile(dir / "one", "abc");
+  WriteFile(dir / "two", "defgh");
+  WriteFile(dir / "sub" / "three", "not counted");
+  const Result<std::uint64_t> eight = FolderBytes(dir);
+  ASSERT_TRUE(eight.ok()) << eight.status().ToString();
+  EXPECT_EQ(*eight, 8U);
+  std::filesystem::remove_all(dir);
 }
 
 // --- Whole runs on MemFileSystem -------------------------------------------------------------
@@ -179,7 +334,7 @@ BenchOptions Small() {
 }
 
 TEST(BenchRunTest, FillRandomCountsWhatItWrote) {
-  const auto factory = NewForgeDBFactory(std::make_shared<MemFileSystem>(), false);
+  const auto factory = NewForgeDBFactory(std::make_shared<MemFileSystem>());
   const BenchOptions options = Small();
   ASSERT_TRUE(factory->CreateRoot("bench").ok());
   const Result<RunResult> result =
@@ -197,7 +352,7 @@ TEST(BenchRunTest, FillRandomCountsWhatItWrote) {
 }
 
 TEST(BenchRunTest, ReadsWriteNothingAndCheckTheirAnswers) {
-  const auto factory = NewForgeDBFactory(std::make_shared<MemFileSystem>(), false);
+  const auto factory = NewForgeDBFactory(std::make_shared<MemFileSystem>());
   const BenchOptions options = Small();
   ASSERT_TRUE(factory->CreateRoot("bench").ok());
   for (const std::string_view workload : {"readrandom", "readmissing", "seekrandom"}) {
@@ -249,8 +404,7 @@ class LossyFactory final : public EngineFactory {
   [[nodiscard]] bool RealFiles() const override { return false; }
 
  private:
-  std::unique_ptr<EngineFactory> real_ =
-      NewForgeDBFactory(std::make_shared<MemFileSystem>(), false);
+  std::unique_ptr<EngineFactory> real_ = NewForgeDBFactory(std::make_shared<MemFileSystem>());
 };
 
 TEST(BenchRunTest, AWrongAnswerFailsTheRun) {
@@ -267,7 +421,7 @@ TEST(BenchRunTest, AWrongAnswerFailsTheRun) {
 }
 
 TEST(BenchRunTest, TheWholeToolWithJson) {
-  const auto factory = NewForgeDBFactory(std::make_shared<MemFileSystem>(), false);
+  const auto factory = NewForgeDBFactory(std::make_shared<MemFileSystem>());
   const std::filesystem::path json_path =
       std::filesystem::temp_directory_path() / "forgedb_bench_test.json";
   std::ostringstream out;
@@ -294,6 +448,8 @@ TEST(BenchRunTest, TheWholeToolWithJson) {
   }
   EXPECT_EQ(runs, 2 * kWorkloads.size());
   EXPECT_NE(json.find(R"("num": 2000)"), std::string::npos);
+  EXPECT_NE(json.find(R"("memtable_mb": 4)"), std::string::npos);
+  EXPECT_NE(json.find(R"("compression": "none")"), std::string::npos);
   EXPECT_NE(json.find(R"("latency_us": {)"), std::string::npos);
   EXPECT_NE(json.find(R"("write_amplification": null)"), std::string::npos) << "in memory";
 
