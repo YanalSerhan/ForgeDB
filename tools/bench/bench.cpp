@@ -16,6 +16,7 @@
 #include <optional>
 #include <ostream>
 #include <random>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -586,27 +587,39 @@ int RunBench(std::span<const std::string> args, EngineFactory& factory, std::ost
       << ", cache " << options.cache_mb << " MiB, runs " << options.runs << ", seed "
       << options.seed << "; databases in " << root.string() << '\n';
 
+  // Runs are interleaved: run 1 of every engine, then run 2 of every engine, and
+  // so on, so a slow spell of the machine (heat, power state, a background task)
+  // falls on every engine alike instead of on one engine's runs.
   std::vector<RunResult> results;
   int exit_code = 0;
   for (const std::string& workload : options.workloads) {
-    for (const std::string& engine : options.engines) {
-      std::vector<double> rates;
-      for (std::uint64_t run = 1; run <= options.runs; ++run) {
+    std::map<std::string, std::vector<double>> rates;
+    std::set<std::string> failed;
+    for (std::uint64_t run = 1; run <= options.runs; ++run) {
+      for (const std::string& engine : options.engines) {
+        if (failed.contains(engine)) {
+          continue;
+        }
         Result<RunResult> result = RunWorkload(factory, engine, workload, run, options, root);
         if (!result.ok()) {
           err << "forgedb_bench: " << workload << " on " << engine << ", run " << run << ": "
               << result.status().ToString() << '\n';
           exit_code = 1;
-          break;
+          failed.insert(engine);
+          continue;
         }
         out << FormatRun(*result) << '\n';
-        rates.push_back(static_cast<double>(result->ops) / result->seconds);
+        rates[engine].push_back(static_cast<double>(result->ops) / result->seconds);
         results.push_back(std::move(result).value());
       }
-      if (rates.size() > 1) {
-        out << workload << "  " << engine << ": ops/s median " << Fixed(Median(rates), 0)
-            << ", min " << Fixed(*std::ranges::min_element(rates), 0) << ", max "
-            << Fixed(*std::ranges::max_element(rates), 0) << " (" << rates.size() << " runs)\n";
+    }
+    for (const std::string& engine : options.engines) {
+      const std::vector<double>& engine_rates = rates[engine];
+      if (engine_rates.size() > 1) {
+        out << workload << "  " << engine << ": ops/s median " << Fixed(Median(engine_rates), 0)
+            << ", min " << Fixed(*std::ranges::min_element(engine_rates), 0) << ", max "
+            << Fixed(*std::ranges::max_element(engine_rates), 0) << " (" << engine_rates.size()
+            << " runs)\n";
       }
     }
   }

@@ -9,7 +9,9 @@ and a section on where ForgeDB loses and why (the Phase 5 exit gate).
 
 ## Running them
 
-Once per machine, in an administrator PowerShell:
+Once per machine, in an administrator PowerShell (run `bench.ps1` from one too: reading
+Defender's exclusions needs an administrator, so otherwise the script cannot confirm the
+exclusion):
 
 ```powershell
 # Defender scans every file a program writes; the benchmark writes gigabytes.
@@ -41,6 +43,10 @@ charts.
 
 - **Runs.** Every engine and workload runs 5 times (`-Runs`), each time on a new database, and
   the charts and tables show the median with the lowest and highest run. One run is not a result.
+  The runs are interleaved (run 1 of every engine, then run 2 of every engine, ...), so a slow
+  spell of the machine falls on every engine alike: the first full run, with each engine's runs
+  back to back, saw synced writes take either about 0.55 ms or 1.5–2 ms, a state that lasted
+  across several runs.
 - **Two modes.** *Unsynced*: every workload, 1,000,000 keys; a write returns once the engine has
   it in its log, which survives a process crash but not a power loss. *Synced*: the four write
   workloads, 50,000 keys; every write waits until its log is on the disk. Reads do not depend on

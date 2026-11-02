@@ -420,6 +420,44 @@ TEST(BenchRunTest, AWrongAnswerFailsTheRun) {
   }
 }
 
+// Two names for ForgeDB, recording the order the runs open their databases.
+class RecordingFactory final : public EngineFactory {
+ public:
+  [[nodiscard]] std::vector<std::string> Engines() const override { return {"first", "second"}; }
+  Result<std::unique_ptr<Engine>> Open(std::string_view engine, const std::filesystem::path& dir,
+                                       const EngineOptions& options) override {
+    opened.emplace_back(engine);
+    return real_->Open("forgedb", dir, options);
+  }
+  Status Remove(const std::filesystem::path& dir) override { return real_->Remove(dir); }
+  Status CreateRoot(const std::filesystem::path& dir) override { return real_->CreateRoot(dir); }
+  [[nodiscard]] bool RealFiles() const override { return false; }
+
+  std::vector<std::string> opened;
+
+ private:
+  std::unique_ptr<EngineFactory> real_ = NewForgeDBFactory(std::make_shared<MemFileSystem>());
+};
+
+TEST(BenchRunTest, RunsAreInterleavedAcrossEngines) {
+  RecordingFactory factory;
+  std::ostringstream out;
+  std::ostringstream err;
+  const std::vector<std::string> args = {"--num=500", "--runs=3", "--db=bench",
+                                         "--engine=first,second", "--workloads=fillseq,readrandom"};
+  ASSERT_EQ(RunBench(args, factory, out, err), 0) << err.str();
+  // fillseq opens one database per run; readrandom one too (it fills it first).
+  EXPECT_EQ(factory.opened,
+            (std::vector<std::string>{"first", "second", "first", "second", "first", "second",
+                                      "first", "second", "first", "second", "first", "second"}));
+  // Each engine's summary comes after all of the workload's runs.
+  const std::size_t last_run = out.str().find("fillseq  second  run 3: ");
+  const std::size_t summary = out.str().find("fillseq  first: ops/s median ");
+  ASSERT_NE(last_run, std::string::npos);
+  ASSERT_NE(summary, std::string::npos);
+  EXPECT_LT(last_run, summary);
+}
+
 TEST(BenchRunTest, TheWholeToolWithJson) {
   const auto factory = NewForgeDBFactory(std::make_shared<MemFileSystem>());
   const std::filesystem::path json_path =
