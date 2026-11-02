@@ -14,9 +14,16 @@
     (FORGEDB_CRASH_CYCLES and the like, meant for long runs by hand) are cleared
     for this run, with a warning, and restored afterwards.
   CI runs this same script, one preset per job.
+  -Quick is for small steps: without -Presets it runs msvc-release and clangcl-tidy
+  only, and with or without -Presets it runs the long tests at the debug presets'
+  sizes (see $quickSizes below). Not for phase gates or engine changes: those get
+  the full run.
 
 .EXAMPLE
   .\scripts\build-all.ps1
+
+.EXAMPLE
+  .\scripts\build-all.ps1 -Quick
 
 .EXAMPLE
   .\scripts\build-all.ps1 -Presets msvc-debug,clangcl-asan
@@ -33,7 +40,9 @@ param(
     # Configure and build only (used by the CI coverage job, which runs the tests itself).
     [switch] $SkipTests,
     # Use this vcpkg checkout instead of searching for one (used by CI).
-    [string] $VcpkgRoot
+    [string] $VcpkgRoot,
+    # Small-step check: fewer presets (unless -Presets is given) and smaller test sizes.
+    [switch] $Quick
 )
 
 Set-StrictMode -Version Latest
@@ -46,6 +55,23 @@ $ErrorActionPreference = 'Stop'
 # "powershell -File build-all.ps1 -Presets a,b" passes "a,b" as ONE string,
 # so split on commas ourselves.
 $Presets = @($Presets | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+
+# -Quick: the two presets that catch most mistakes in a small step (an optimized
+# build with every test, and clang-tidy on every file), unless presets were named.
+if ($Quick -and -not $PSBoundParameters.ContainsKey('Presets')) {
+    $Presets = @('msvc-release', 'clangcl-tidy')
+}
+# -Quick's test sizes: the ones the debug and ASan presets always use
+# (tests/CMakeLists.txt), so every test's own checks are known to hold at them.
+# Release builds default to 10 times as many model operations (most of
+# msvc-release's test time), 4 times the crash cycles, and more of the rest.
+$quickSizes = [ordered]@{
+    FORGEDB_MODEL_OPS         = '100000'
+    FORGEDB_CRASH_CYCLES      = '100'
+    FORGEDB_KILL_RUNS         = '20'
+    FORGEDB_CORRUPTION_TRIALS = '100'
+    FORGEDB_STRESS_SECONDS    = '5'
+}
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $logDir = Join-Path $repoRoot 'out\logs'
@@ -96,6 +122,13 @@ try {
             Remove-Item "Env:$name"
         }
     }
+    if ($Quick) {
+        Write-Host "Quick run: presets $($Presets -join ', '); smaller test sizes:" -ForegroundColor Yellow
+        foreach ($name in $quickSizes.Keys) {
+            Write-Host "  $name=$($quickSizes[$name])" -ForegroundColor Yellow
+            Set-Item "Env:$name" $quickSizes[$name]
+        }
+    }
 
     foreach ($preset in $Presets) {
         $row = [ordered]@{ Preset = $preset; Configure = '-'; Build = '-'; Test = '-'; Seconds = 0 }
@@ -142,6 +175,11 @@ try {
     }
 }
 finally {
+    if ($Quick) {
+        foreach ($name in $quickSizes.Keys) {
+            Remove-Item "Env:$name" -ErrorAction SilentlyContinue
+        }
+    }
     foreach ($name in $savedOverrides.Keys) {
         Set-Item "Env:$name" $savedOverrides[$name]
     }
@@ -161,5 +199,9 @@ if ($failed.Count -gt 0) {
     Write-Host "$($failed.Count) preset(s) failed: $(($failed | ForEach-Object { $_.Preset }) -join ', ')" -ForegroundColor Red
     exit 1
 }
-Write-Host 'All presets passed.' -ForegroundColor Green
+if ($Quick) {
+    Write-Host 'All presets passed (quick run: smaller test sizes; not a phase gate).' -ForegroundColor Green
+} else {
+    Write-Host 'All presets passed.' -ForegroundColor Green
+}
 exit 0

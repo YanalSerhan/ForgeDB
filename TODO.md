@@ -352,11 +352,12 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - Found by the 5.1a build (msvc-asan, `CrashTortureTest.CrashesDuringFlushesWithInjectedErrors`, seed 1, cycle 1,478 of 10,000): the test hooks that wait for background work (`WaitForBackgroundWorkForTesting`, `WaitForFlushForTesting`, the synchronous-flush waits) returned as soon as a job failed, while the failed job still deleted obsolete tables; the torture test's reads raced those deletions, one of which was where its simulated crash struck. A test-hook bug, not a durability one: a failed job now counts as running until it has ended. `BackgroundWaitTest.AFailedJobIsIdleOnlyOnceItsDeletionsAreDone` holds a failed job in its deletions and failed 3 of 3 before the fix, passed 10 of 10 after
 
 ### 5.2 Methodology
-- [ ] Exclude the benchmark folder from Windows Defender real-time scanning; note it in `docs/benchmarks.md`
-- [ ] Power plan High performance; close other heavy programs
-- [ ] 5+ runs per workload; median with min and max
-- [ ] Record CPU, RAM, SSD model, Windows build, compiler and flags
-- [ ] `bench/plot.py` (matplotlib) turns JSON results into charts
+*`scripts/bench.ps1` runs it all (build, checks, machine record, runs, charts); `docs/benchmarks.md` has the method. Unsynced: every workload, 1,000,000 keys; synced: the four write workloads, 50,000 keys (a synced write waits for the disk; reads do not depend on the mode).*
+- [x] Exclude the benchmark folder from Windows Defender real-time scanning; note it in `docs/benchmarks.md` (the command is there; `bench.ps1` warns when real-time scanning is on and the folder is not excluded, or the exclusion cannot be read without an administrator)
+- [x] Power plan High performance; close other heavy programs (in `docs/benchmarks.md`; `bench.ps1` warns about another plan and about battery power)
+- [x] 5+ runs per workload; median with min and max (`bench.ps1 -Runs 5`, each run on a new database; `bench/plot.py` shows the median with the lowest and highest run)
+- [x] Record CPU, RAM, SSD model, Windows build, compiler and flags (`machine.json` in each results folder; also the power plan, AC power, Defender, the other engines' vcpkg versions and the commit)
+- [x] `bench/plot.py` (matplotlib) turns JSON results into charts (per sync mode: throughput, p99 latency, write and space amplification, one panel per workload; and `results.md`, every number as median [min–max])
 
 ### 5.3 Profiling and optimization
 - [ ] Profile `fillrandom` and `readrandom` with the Visual Studio profiler or WPR/WPA

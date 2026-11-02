@@ -171,7 +171,12 @@ itself, prints a summary table and writes logs to `out\logs\`):
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build-all.ps1
 powershell -ExecutionPolicy Bypass -File scripts\build-all.ps1 -Presets msvc-debug,clangcl-asan -Clean
+powershell -ExecutionPolicy Bypass -File scripts\build-all.ps1 -Quick
 ```
+
+`-Quick` is for small steps: `msvc-release` and `clangcl-tidy` only (unless `-Presets` names
+others), with the long tests at the debug presets' sizes. Phase gates and engine changes get the
+full run.
 
 Other scripts (same environment setup, usable locally and in CI):
 
@@ -180,6 +185,8 @@ powershell -ExecutionPolicy Bypass -File scripts\check-format.ps1        # add -
 powershell -ExecutionPolicy Bypass -File scripts\coverage.ps1            # after building msvc-debug;
                                                                          # needs: choco install opencppcoverage
 powershell -ExecutionPolicy Bypass -File scripts\fuzz.ps1                # 1 hour per fuzz target; -Seconds N
+powershell -ExecutionPolicy Bypass -File scripts\bench.ps1               # ForgeDB vs RocksDB, LevelDB, SQLite;
+                                                                         # 1-2 hours; see docs/benchmarks.md
 ```
 
 ## Testing
