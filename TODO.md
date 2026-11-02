@@ -362,6 +362,7 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 ### 5.3 Profiling and optimization
 - [ ] Profile `fillrandom` and `readrandom` with the Visual Studio profiler or WPR/WPA
 - [ ] At least two optimizations, each with before/after numbers and a flame graph (candidates: write-path lock scope, cache shard count, avoiding copies with `string_view`, CRC32C fast path, bloom check before index read)
+- The first benchmark run (2026-11-02, commit 314d43e, `docs/benchmarks.md`) points at: point reads (LevelDB 3.8× faster; it reads table blocks from memory-mapped files, ForgeDB calls `ReadFile` per block), seeks and scans (the slowest of the four engines), fillseq rewriting sorted data (no whole-table moves; write amplification 3.09 vs 2.19), absent keys (RocksDB's filter path faster), and space amplification 1.13 after fillrandom (cause unknown)
 - [ ] Every optimization keeps the full test suite green
 
 ### ✅ Exit gate — Phase 5
