@@ -50,7 +50,14 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # With Ninja's parallel compiles this avoids contention on the shared PDB, and it
 # is the format compiler caches (used later in CI) can handle. Linked .exe files
 # still get a normal .pdb.
-set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "$<$<CONFIG:Debug,RelWithDebInfo>:Embedded>")
+#
+# Release builds get debug info too, so a profiler can name the functions in a
+# release build's samples (TODO 5.3; scripts/cpu-profile.ps1). It changes no code:
+# /DEBUG makes the linker write a .pdb, and /OPT:REF /OPT:ICF keep the unused-code
+# removal and identical-function folding that /DEBUG would otherwise switch off.
+set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "$<$<CONFIG:Debug,RelWithDebInfo,Release>:Embedded>")
+add_link_options("$<$<CONFIG:Release>:/DEBUG>" "$<$<CONFIG:Release>:/OPT:REF>"
+                 "$<$<CONFIG:Release>:/OPT:ICF>")
 
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 include(ForgeDBCompilerOptions)

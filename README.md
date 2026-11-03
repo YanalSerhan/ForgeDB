@@ -187,6 +187,8 @@ powershell -ExecutionPolicy Bypass -File scripts\coverage.ps1            # after
 powershell -ExecutionPolicy Bypass -File scripts\fuzz.ps1                # 1 hour per fuzz target; -Seconds N
 powershell -ExecutionPolicy Bypass -File scripts\bench.ps1               # ForgeDB vs RocksDB, LevelDB, SQLite;
                                                                          # 1-2 hours; see docs/benchmarks.md
+powershell -ExecutionPolicy Bypass -File scripts\cpu-profile.ps1         # CPU profile of one workload on ForgeDB
+                                                                         # (Visual Studio's profiler); -Workload X
 ```
 
 ## Testing
