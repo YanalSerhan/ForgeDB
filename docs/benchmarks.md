@@ -8,7 +8,7 @@ same data and the same settings where the engines have them. Everything here com
 
 **Status.** The first full run, before any Phase 5.3 optimization (commit 314d43e). The final
 numbers come from a run after 5.3, on the final code, with the machine set up as described
-below. The synced results are not shown yet (see [Synced writes](#synced-writes-not-yet)).
+below. Synced writes: [their own section](#results-synced-writes-2026-11-02).
 
 **Machine.** Dell G5 5500 laptop: Intel Core i7-10750H (6 cores, 12 threads), 15.8 GB RAM at
 2933 MHz, SK hynix PC611 1 TB NVMe SSD; Windows 11 Home 25H2 (build 26200.9711), on AC power.
@@ -77,8 +77,8 @@ Bloom filters, no compression, unsynced. Median [lowest–highest] of 5 runs.
   all of level 0 at once and does not move whole tables, hence write amplification 3.09 against
   2.19.
 - **Space: 13% over the data after fillrandom** (1.13, against 1.00 for RocksDB and 1.01 for
-  LevelDB). fillrandom writes every key once, so this is not old versions of keys; the cause is
-  not known yet.
+  LevelDB). fillrandom writes every key once, so this is not old versions of keys. One lead:
+  ForgeDB keeps the log its last flush retired (see the synced results, below); not confirmed.
 
 ### The other engines
 
@@ -92,12 +92,42 @@ Bloom filters, no compression, unsynced. Median [lowest–highest] of 5 runs.
   one 4 KiB page into its log: write amplification 54–115, and 6–21K writes per second. Its
   scans are fast (2.26M entries/s): a B-tree keeps each key once, in order.
 
-### Synced writes: not yet
+## Results: synced writes (2026-11-02)
 
-The first run did each engine's 5 runs back to back, and on this laptop a synced write took
-either about 0.55 ms or 1.5–2 ms, a state that lasted across several runs: the medians mostly
-showed which state each engine's runs fell in. The runs are now interleaved across engines
-(see [Method](#method)), and the synced results come from a new run.
+**Run.** Commit 8821349 (the engines' code is that of the unsynced run), the same laptop, now as
+the method asks: High performance power plan, AC power, the database folder excluded from
+Defender's scanning (confirmed), and the runs interleaved across engines. The four write
+workloads, 20,000 keys, every write synced; 5 runs each.
+
+| ops/s | ForgeDB | RocksDB | LevelDB | SQLite |
+|---|---|---|---|---|
+| fillseq, median [min–max] | 1,762 [1,724–2,000] | 1,704 [1,550–1,888] | 749 [599–1,750] | 1,635 [1,445–1,638] |
+| fillrandom | 1,735 [1,704–1,739] | 1,705 [1,666–1,710] | 780 [712–891] | 1,346 [1,139–1,592] |
+| overwrite | 852 [704–1,841] | 794 [639–908] | 1,260 [830–1,701] | 1,548 [638–1,593] |
+| mixed (10% synced writes) | 16.7K [5,890–17.5K] | 16.5K [3,985–17.8K] | 5,630 [4,556–16.5K] | 15.3K [4,250–15.7K] |
+
+![Throughput, synced](benchmarks/throughput-synced.png)
+
+**What these numbers measure: mostly the SSD.** A synced write waits for `FlushFileBuffers`, and
+on this machine that wait comes in two sizes: about 0.5–0.6 ms (the typical write in most runs,
+for every engine) or about 2–3 ms, and the share of slow ones changes from run to run, which is
+what the wide ranges show. It is not one engine's doing: ForgeDB alone, run after run, went from
+28 s to 77–86 s for the same work in the first full run; and interleaving the engines did not
+make it fall evenly. In this run the fills were slow for LevelDB in 9 of 10 runs while the
+other engines' runs between them were mostly fast; in the first run it was the other way round. The
+cause is not known (the drive's own background work is one candidate), so the medians above say
+which runs the slow flushes landed in, not how fast an engine is.
+
+**What does hold.** When the flushes are fast, every engine is held to the drive's flush time:
+the best runs are within 20% of each other (fillseq: ForgeDB 2,000 writes/s, RocksDB 1,888,
+LevelDB 1,750, SQLite 1,638), at a typical 0.49–0.59 ms per write, with ForgeDB at the top of
+that range. Write amplification is 1.19 for the three LSM engines in the fills
+(just the log; 20,000 keys never fill a write buffer) and 54–78 for SQLite.
+
+**Space after synced overwrite: ForgeDB 3.78, LevelDB 2.11, RocksDB 1.64.** At this size one
+flush has happened, and ForgeDB keeps the log that flush retired until the next MANIFEST
+record (ADR 0007), as well as the current one; LevelDB deletes the old log after the flush. The
+same retired log, up to one write buffer's worth, is a lead for the 13% in the unsynced results.
 
 ## Running them
 
