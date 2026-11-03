@@ -144,6 +144,14 @@ Rules, each implemented in `src/env/win_file_system.cpp` unless noted.
     don't share a file position; `ERROR_HANDLE_EOF` means "0 bytes" (F11). Windows serializes
     synchronous I/O on one handle, so these reads are correct but not parallel; revisit in Phase 5
     if profiling shows contention.
+    *Phase 5.3:* a reader (`NewRandomAccessFile`, used for table files) now also maps the file
+    read-only into memory when it opens it (`CreateFileMappingW`, `MapViewOfFile`) and copies the
+    requested bytes from the mapping: no system call per read, which the profile showed to be most
+    of a random read's time. The part of a read past the file's length at open (a file that grew
+    since) still uses `ReadFile`, as does an empty file or one that cannot be mapped. A page that
+    cannot be read raises `EXCEPTION_IN_PAGE_ERROR` instead of failing a call; the copy catches
+    exactly that and returns an I/O error (untested: no test can make a disk fail). Tables are
+    immutable once written and synced, so what the mapping shows is what `ReadFile` would.
 13. **Syncing a closed file.** `FileSystem::SyncFile` opens an existing file with `GENERIC_WRITE`
     (`OPEN_EXISTING`, so nothing is created or truncated) and calls `FlushFileBuffers`. Recovery
     uses it to make every replayed log durable before new writes can depend on its data (found by

@@ -5,9 +5,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -284,31 +286,92 @@ class WinSequentialFile final : public SequentialFile {
   std::filesystem::path path_;
 };
 
+// A read-only view of a file mapped into memory, unmapped when destroyed.
+class MappedView {
+ public:
+  MappedView() noexcept = default;
+  MappedView(const char* data, std::size_t size) noexcept : data_(data), size_(size) {}
+  ~MappedView() {
+    if (data_ != nullptr) {
+      ::UnmapViewOfFile(data_);
+    }
+  }
+  MappedView(const MappedView&) = delete;
+  MappedView& operator=(const MappedView&) = delete;
+  MappedView(MappedView&& other) noexcept
+      : data_(std::exchange(other.data_, nullptr)), size_(std::exchange(other.size_, 0)) {}
+  MappedView& operator=(MappedView&&) = delete;
+
+  [[nodiscard]] const char* Data() const noexcept { return data_; }
+  [[nodiscard]] std::size_t Size() const noexcept { return size_; }
+
+ private:
+  const char* data_ = nullptr;
+  std::size_t size_ = 0;
+};
+
+// The whole file, as long as it is now, mapped read-only; an empty view if the
+// file is empty or the mapping fails (its reader then uses ReadFile). The
+// mapping handle can close at once: the view keeps the mapping alive.
+MappedView MapWholeFile(HANDLE file) {
+  LARGE_INTEGER size{};
+  if (::GetFileSizeEx(file, &size) == FALSE || size.QuadPart <= 0 ||
+      static_cast<std::uint64_t>(size.QuadPart) > std::numeric_limits<std::size_t>::max()) {
+    return {};
+  }
+  const UniqueHandle mapping(::CreateFileMappingW(file, nullptr, PAGE_READONLY, 0, 0, nullptr));
+  if (!mapping.IsValid()) {
+    return {};
+  }
+  const void* data = ::MapViewOfFile(mapping.Get(), FILE_MAP_READ, 0, 0, 0);
+  if (data == nullptr) {
+    return {};
+  }
+  return {static_cast<const char*>(data), static_cast<std::size_t>(size.QuadPart)};
+}
+
+// Copies `size` bytes out of a mapped view. A page that cannot be read (a disk
+// error; a file on a network share that went away) does not fail a call: it
+// raises EXCEPTION_IN_PAGE_ERROR when touched. This catches exactly that and
+// returns false. (No C++ objects here: a function with __try cannot need
+// unwinding.)
+bool CopyFromView(char* to, const char* from, std::size_t size) noexcept {
+#ifdef _MSC_VER
+  __try {
+    std::memcpy(to, from, size);
+    return true;
+  } __except (::GetExceptionCode() == EXCEPTION_IN_PAGE_ERROR ? EXCEPTION_EXECUTE_HANDLER
+                                                              : EXCEPTION_CONTINUE_SEARCH) {
+    return false;
+  }
+#else
+  // MSVC and clang-cl are the only supported compilers; MinGW, which has no
+  // __try, is used only to run the tests under Wine during development.
+  std::memcpy(to, from, size);
+  return true;
+#endif
+}
+
 class WinRandomAccessFile final : public RandomAccessFile {
  public:
-  WinRandomAccessFile(UniqueHandle file, std::filesystem::path path)
-      : file_(std::move(file)), path_(std::move(path)) {}
+  WinRandomAccessFile(UniqueHandle file, std::filesystem::path path, MappedView view)
+      : file_(std::move(file)), path_(std::move(path)), view_(std::move(view)) {}
 
-  // Each ReadFile names its own offset in an OVERLAPPED structure, so
-  // concurrent calls don't depend on (or race on) the handle's shared file
-  // position. On a handle opened without FILE_FLAG_OVERLAPPED, Windows runs
-  // these synchronous calls one at a time: correct, though not parallel.
+  // The part of the request inside the mapping (if any) is copied from it; the
+  // rest, past the end of the file as it was when opened (it may have grown
+  // since), is read with ReadFile.
   Result<std::size_t> Read(std::uint64_t offset, std::span<char> buffer) const override {
     std::size_t total = 0;
-    while (total < buffer.size()) {
-      const std::uint64_t position = offset + total;
-      OVERLAPPED at{};
-      at.Offset = static_cast<DWORD>(position & 0xFFFFFFFFU);
-      at.OffsetHigh = static_cast<DWORD>(position >> 32);
-      const auto chunk = static_cast<DWORD>(std::min(buffer.size() - total, kMaxIoChunk));
-      DWORD read = 0;
-      if (::ReadFile(file_.Get(), buffer.data() + total, chunk, &read, &at) == FALSE) {
-        const DWORD error = ::GetLastError();
-        if (error == ERROR_HANDLE_EOF) {  // the read started at or past the end
-          break;
-        }
-        return ErrorStatus(error, "ReadFile", path_);
+    if (offset < view_.Size()) {
+      total = std::min(buffer.size(), view_.Size() - static_cast<std::size_t>(offset));
+      if (!CopyFromView(buffer.data(), view_.Data() + offset, total)) {
+        return Status::IOError("reading memory-mapped file " + PathToUtf8(path_),
+                               "in-page error (the disk could not supply a page)");
       }
+    }
+    while (total < buffer.size()) {
+      FORGEDB_ASSIGN_OR_RETURN(const std::size_t read,
+                               ReadWithReadFile(offset + total, buffer.subspan(total)));
       if (read == 0) {
         break;
       }
@@ -317,9 +380,33 @@ class WinRandomAccessFile final : public RandomAccessFile {
     return total;
   }
 
+  [[nodiscard]] bool Mapped() const noexcept { return view_.Data() != nullptr; }
+
  private:
+  // One ReadFile call at `position`; 0 at or past the end of the file. Each
+  // call names its own offset in an OVERLAPPED structure, so concurrent calls
+  // don't depend on (or race on) the handle's shared file position. On a handle
+  // opened without FILE_FLAG_OVERLAPPED, Windows runs these synchronous calls
+  // one at a time: correct, though not parallel.
+  Result<std::size_t> ReadWithReadFile(std::uint64_t position, std::span<char> buffer) const {
+    OVERLAPPED at{};
+    at.Offset = static_cast<DWORD>(position & 0xFFFFFFFFU);
+    at.OffsetHigh = static_cast<DWORD>(position >> 32);
+    const auto chunk = static_cast<DWORD>(std::min(buffer.size(), kMaxIoChunk));
+    DWORD read = 0;
+    if (::ReadFile(file_.Get(), buffer.data(), chunk, &read, &at) == FALSE) {
+      const DWORD error = ::GetLastError();
+      if (error == ERROR_HANDLE_EOF) {  // the read started at or past the end
+        return std::size_t{0};
+      }
+      return ErrorStatus(error, "ReadFile", path_);
+    }
+    return std::size_t{read};
+  }
+
   UniqueHandle file_;
   std::filesystem::path path_;
+  MappedView view_;
 };
 
 class WinFileLock final : public FileLock {
@@ -394,7 +481,8 @@ Result<std::unique_ptr<SequentialFile>> WinFileSystem::NewSequentialFile(
 Result<std::unique_ptr<RandomAccessFile>> WinFileSystem::NewRandomAccessFile(
     const std::filesystem::path& path) {
   FORGEDB_ASSIGN_OR_RETURN(UniqueHandle file, OpenForReading(path, FILE_FLAG_RANDOM_ACCESS));
-  return std::make_unique<WinRandomAccessFile>(std::move(file), path);
+  MappedView view = map_reads_ ? MapWholeFile(file.Get()) : MappedView();
+  return std::make_unique<WinRandomAccessFile>(std::move(file), path, std::move(view));
 }
 
 Status WinFileSystem::RenameReplace(const std::filesystem::path& from,
@@ -527,6 +615,11 @@ Status WinFileSystem::UnlockFile(std::unique_ptr<FileLock> lock) {
     return Status::InvalidArgument("UnlockFile: the lock does not come from this WinFileSystem");
   }
   return win_lock->Unlock();
+}
+
+bool IsMemoryMapped(const RandomAccessFile& file) {
+  const auto* win = dynamic_cast<const WinRandomAccessFile*>(&file);
+  return win != nullptr && win->Mapped();
 }
 
 }  // namespace forgedb

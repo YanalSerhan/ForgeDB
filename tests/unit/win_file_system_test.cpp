@@ -8,6 +8,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <filesystem>
 
 #include <gtest/gtest.h>
@@ -144,6 +146,64 @@ TEST(WinFileSystemTest, NonAsciiNamesComeBackAsUtf8) {
   Result<std::vector<std::string>> children = fs.GetChildren(dir.Path());
   ASSERT_TRUE(children.ok()) << children.status().ToString();
   EXPECT_EQ(*children, (std::vector<std::string>{"caf\xC3\xA9.log"}));
+}
+
+// --- Memory-mapped reads (TODO 5.3) -------------------------------------------
+
+std::string ReadAt(const RandomAccessFile& file, std::uint64_t offset, std::size_t size) {
+  std::string buffer(size, '\0');
+  const Result<std::size_t> count = file.Read(offset, buffer);
+  EXPECT_TRUE(count.ok()) << count.status().ToString();
+  buffer.resize(count.ok() ? *count : 0);
+  return buffer;
+}
+
+TEST(WinFileSystemTest, RandomAccessFilesAreMemoryMappedUnlessTurnedOff) {
+  const TempDir dir;
+  const auto path = dir.Path() / "000009.sst";
+  WinFileSystem mapping;
+  WriteFile(mapping, path, "table contents");
+
+  Result<std::unique_ptr<RandomAccessFile>> mapped = mapping.NewRandomAccessFile(path);
+  ASSERT_TRUE(mapped.ok()) << mapped.status().ToString();
+  EXPECT_TRUE(IsMemoryMapped(**mapped));
+  EXPECT_EQ(ReadAt(**mapped, 6, 100), "contents");
+
+  WinFileSystem plain(/*map_reads=*/false);
+  Result<std::unique_ptr<RandomAccessFile>> unmapped = plain.NewRandomAccessFile(path);
+  ASSERT_TRUE(unmapped.ok()) << unmapped.status().ToString();
+  EXPECT_FALSE(IsMemoryMapped(**unmapped));
+  EXPECT_EQ(ReadAt(**unmapped, 6, 100), "contents");
+}
+
+TEST(WinFileSystemTest, AnEmptyFileIsReadWithoutAMapping) {
+  const TempDir dir;
+  const auto path = dir.Path() / "empty";
+  WinFileSystem fs;
+  WriteFile(fs, path, "");
+  Result<std::unique_ptr<RandomAccessFile>> file = fs.NewRandomAccessFile(path);
+  ASSERT_TRUE(file.ok()) << file.status().ToString();
+  EXPECT_FALSE(IsMemoryMapped(**file)) << "Windows cannot map an empty file";
+  EXPECT_EQ(ReadAt(**file, 0, 10), "");
+}
+
+// Compaction deletes tables a reader may still have open (and now mapped):
+// the name must go at once, the mapping keep working.
+TEST(WinFileSystemTest, AMappedFileCanBeRemovedAndItsNameReused) {
+  const TempDir dir;
+  const auto path = dir.Path() / "000011.sst";
+  WinFileSystem fs;
+  WriteFile(fs, path, std::string(100000, 'a'));
+  Result<std::unique_ptr<RandomAccessFile>> reader = fs.NewRandomAccessFile(path);
+  ASSERT_TRUE(reader.ok()) << reader.status().ToString();
+  ASSERT_TRUE(IsMemoryMapped(**reader));
+
+  const Status removed = fs.RemoveFile(path);
+  ASSERT_TRUE(removed.ok()) << removed.ToString();
+  EXPECT_FALSE(fs.FileExists(path).value());
+  EXPECT_EQ(ReadAt(**reader, 99990, 100), std::string(10, 'a'));
+  WriteFile(fs, path, "new");
+  EXPECT_EQ(ReadAt(**reader, 0, 3), "aaa");
 }
 
 // --- Retry around delete -----------------------------------------------------

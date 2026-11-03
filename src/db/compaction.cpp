@@ -95,6 +95,25 @@ std::vector<FileMetaData> OverlappingFiles(const Version& version, int level,
   return overlapping;
 }
 
+bool Compaction::IsTrivialMove() const noexcept {
+  if (!inputs[1].empty()) {
+    return false;
+  }
+  // Level 0 has at most a few dozen tables (writes stall at
+  // level0_stop_writes_trigger), so comparing every pair is cheap.
+  const std::vector<FileMetaData>& files = inputs[0];
+  for (std::size_t i = 0; i < files.size(); ++i) {
+    for (std::size_t j = i + 1; j < files.size(); ++j) {
+      const bool apart = ExtractUserKey(files[i].largest) < ExtractUserKey(files[j].smallest) ||
+                         ExtractUserKey(files[j].largest) < ExtractUserKey(files[i].smallest);
+      if (!apart) {
+        return false;
+      }
+    }
+  }
+  return !files.empty();
+}
+
 bool Compaction::IsBaseLevelForKey(std::string_view user_key) const {
   for (int deeper = level + 2; deeper < kNumLevels; ++deeper) {
     for (const FileMetaData& file : version->files.at(static_cast<std::size_t>(deeper))) {

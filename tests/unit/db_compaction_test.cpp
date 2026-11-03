@@ -25,6 +25,7 @@
 #include "forgedb/options.h"
 #include "forgedb/result.h"
 #include "forgedb/snapshot.h"
+#include "forgedb/stats.h"
 #include "forgedb/status.h"
 
 #include "db/compaction.h"
@@ -153,6 +154,37 @@ TEST(CompactionPickTest, LevelZeroTakesEveryTableAndTheOverlappingNextLevel) {
   EXPECT_FALSE(compaction.IsTrivialMove());
 }
 
+// TODO 5.3: level-0 tables that overlap neither each other nor anything in
+// level 1 move down together, unchanged (ADR 0008, rule 2).
+TEST(CompactionPickTest, DisjointLevelZeroTablesMoveDownTogether) {
+  const Options options = SmallLevels();
+  Version version;
+  version.files[0] = {File(14, 10, "m", "p"), File(13, 10, "g", "k"), File(12, 10, "a", "c"),
+                      File(11, 10, "d", "f")};
+  version.files[1] = {File(5, 10, "q", "s")};
+  CompactionPointers pointers;
+  const Compaction moved =
+      Must(PickCompaction(std::make_shared<const Version>(version), options, pointers));
+  EXPECT_EQ(moved.level, 0);
+  EXPECT_EQ(Numbers(moved.inputs[0]), (std::vector<std::uint64_t>{14, 13, 12, 11}));
+  EXPECT_TRUE(moved.inputs[1].empty());
+  EXPECT_TRUE(moved.IsTrivialMove());
+
+  Version gap = version;
+  gap.files[1] = {File(5, 10, "l", "l")};  // between tables 13 and 14
+  const Compaction merged =
+      Must(PickCompaction(std::make_shared<const Version>(gap), options, pointers));
+  EXPECT_EQ(Numbers(merged.inputs[1]), (std::vector<std::uint64_t>{5}));
+  EXPECT_FALSE(merged.IsTrivialMove()) << "a level-1 table inside their range";
+
+  Version touching = version;
+  touching.files[0][0] = File(14, 10, "k", "p");  // "k" is in table 13 too
+  const Compaction overlapping =
+      Must(PickCompaction(std::make_shared<const Version>(touching), options, pointers));
+  EXPECT_TRUE(overlapping.inputs[1].empty());
+  EXPECT_FALSE(overlapping.IsTrivialMove()) << "two level-0 tables share a user key";
+}
+
 TEST(CompactionPickTest, DeeperLevelsGoRoundRobin) {
   const Options options = SmallLevels();
   Version version;
@@ -209,6 +241,12 @@ std::string Key(int i) {
   const std::string digits = std::to_string(i);
   return "key" + std::string(digits.size() < 6 ? 6 - digits.size() : 0, '0') + digits;
 }
+
+// Key i in a scattered order (distinct for i below 10,007): consecutive writes
+// land all over the key space, so each memtable's table spans most of it and
+// level-0 tables overlap. (Tables of sequential keys overlap nothing and only
+// move down: ADR 0008, rule 2.)
+std::string ScatteredKey(int i) { return Key(static_cast<int>((i * 7919LL) % 10007)); }
 
 std::string Get(DB& db, std::string_view key, std::shared_ptr<const Snapshot> snapshot = nullptr) {
   Result<std::string> value = db.Get({.snapshot = std::move(snapshot)}, key);
@@ -340,6 +378,34 @@ TEST_F(CompactionTest, AutomaticCompactionsKeepEverythingReadable) {
   }
   const std::unique_ptr<DB> db = Open(TinyLevels());
   EXPECT_EQ(Scan(*db), expected);
+}
+
+// Sequential writes flush tables that overlap nothing: every compaction is a
+// move, and no table is ever written twice (TODO 5.3).
+TEST_F(CompactionTest, SequentialWritesAreNeverRewritten) {
+  State expected;
+  const std::unique_ptr<DB> db = Open(TinyLevels());
+  ASSERT_NE(db, nullptr);
+  for (int i = 0; i < 4000; ++i) {
+    const std::string value = "v" + std::to_string(i) + std::string(40, 'x');
+    ASSERT_TRUE(db->Put({}, Key(i), value).ok());
+    expected[Key(i)] = value;
+  }
+  Impl(*db).WaitForBackgroundWorkForTesting();
+  const DBStats stats = db->GetStats();
+  std::uint64_t moves = 0;
+  std::uint64_t rewrites = 0;
+  for (const LevelStats& level : stats.levels) {
+    moves += level.compactions.trivial_moves;
+    rewrites += level.compactions.count;
+  }
+  EXPECT_GT(stats.levels[0].compactions.trivial_moves, 0U) << "level 0 moved down";
+  EXPECT_GT(moves, stats.levels[0].compactions.trivial_moves) << "and further down";
+  EXPECT_EQ(rewrites, 0U);
+  EXPECT_EQ(stats.TableBytesWritten(), stats.flush_bytes_written);
+  EXPECT_FALSE(NeedsCompaction(*Impl(*db).CurrentVersion(), TinyLevels()));
+  EXPECT_EQ(Scan(*db), expected);
+  EXPECT_EQ(Get(*db, Key(1234)), expected[Key(1234)]);
 }
 
 TEST_F(CompactionTest, ACompactionDropsWhatNoReaderCanSee) {
@@ -641,7 +707,7 @@ TEST(CompactionErrorTest, AFailedCompactionStopsWritesAndLosesNothing) {
     const std::unique_ptr<DB> db = std::move(OpenDB(options, "db", fs)).value();
     Impl(*db).SetSynchronousFlushForTesting(true);  // the file operations in a fixed order
     while (Impl(*db).FlushesForTesting() < 1) {
-      ASSERT_TRUE(db->Put({}, Key(written), std::string(100, 'v')).ok());
+      ASSERT_TRUE(db->Put({}, ScatteredKey(written), std::string(100, 'v')).ok());
       ++written;
     }
     // The second flush: the old log's sync, the table's, the MANIFEST's; then
@@ -649,20 +715,20 @@ TEST(CompactionErrorTest, AFailedCompactionStopsWritesAndLosesNothing) {
     fs->FailNth(FaultInjectionFileSystem::Op::kSync, 4);
     Status status;
     while (status.ok()) {
-      status = db->Put({}, Key(written), std::string(100, 'v'));
+      status = db->Put({}, ScatteredKey(written), std::string(100, 'v'));
       written += status.ok() ? 1 : 0;
     }
     EXPECT_EQ(Impl(*db).FlushesForTesting(), 2U);
     EXPECT_EQ(Impl(*db).CompactionsForTesting(), 0U);
     EXPECT_FALSE(db->Put({}, "later", "x").ok()) << "sticky";
     for (int i = 0; i < written; ++i) {
-      ASSERT_EQ(Get(*db, Key(i)), std::string(100, 'v')) << "reads go on: " << i;
+      ASSERT_EQ(Get(*db, ScatteredKey(i)), std::string(100, 'v')) << "reads go on: " << i;
     }
   }
   fs->ClearFaults();
   const std::unique_ptr<DB> db = std::move(OpenDB(options, "db", fs)).value();
   for (int i = 0; i < written; ++i) {
-    ASSERT_EQ(Get(*db, Key(i)), std::string(100, 'v')) << i;
+    ASSERT_EQ(Get(*db, ScatteredKey(i)), std::string(100, 'v')) << i;
   }
   Impl(*db).WaitForBackgroundWorkForTesting();
   EXPECT_GT(Impl(*db).CompactionsForTesting(), 0U) << "it compacts after the reopen";
@@ -684,7 +750,7 @@ TEST(CompactionErrorTest, AFailedManifestSyncKeepsTheOutputs) {
       const std::unique_ptr<DB> db = std::move(OpenDB(options, "db", fs)).value();
       Impl(*db).SetSynchronousFlushForTesting(true);
       while (Impl(*db).FlushesForTesting() < 1) {
-        ASSERT_TRUE(db->Put({}, Key(written), std::string(100, 'v')).ok());
+        ASSERT_TRUE(db->Put({}, ScatteredKey(written), std::string(100, 'v')).ok());
         ++written;
       }
       // The second flush syncs the old log, its table and the MANIFEST; the
@@ -693,7 +759,7 @@ TEST(CompactionErrorTest, AFailedManifestSyncKeepsTheOutputs) {
       fs->FailNth(FaultInjectionFileSystem::Op::kSync, 5);
       Status status;
       while (status.ok()) {
-        status = db->Put({}, Key(written), std::string(100, 'v'));
+        status = db->Put({}, ScatteredKey(written), std::string(100, 'v'));
         written += status.ok() ? 1 : 0;
       }
       ASSERT_EQ(Impl(*db).CompactionsForTesting(), 0U);
@@ -704,7 +770,7 @@ TEST(CompactionErrorTest, AFailedManifestSyncKeepsTheOutputs) {
     const Result<std::unique_ptr<DB>> db = OpenDB(options, "db", fs);
     ASSERT_TRUE(db.ok()) << db.status().ToString();
     for (int i = 0; i < written; ++i) {
-      ASSERT_EQ(Get(**db, Key(i)), std::string(100, 'v')) << i;
+      ASSERT_EQ(Get(**db, ScatteredKey(i)), std::string(100, 'v')) << i;
     }
   }
 }
@@ -775,7 +841,7 @@ TEST(BackgroundWaitTest, AFailedJobIsIdleOnlyOnceItsDeletionsAreDone) {
   int written = 0;
   const auto write = [&](int n) {
     for (int i = 0; i < n; ++i, ++written) {
-      ASSERT_TRUE(db->Put({}, Key(written), std::string(20, 'v')).ok());
+      ASSERT_TRUE(db->Put({}, ScatteredKey(written), std::string(20, 'v')).ok());
     }
   };
   // Two level-0 tables, and an iterator that keeps them in use.
@@ -800,7 +866,7 @@ TEST(BackgroundWaitTest, AFailedJobIsIdleOnlyOnceItsDeletionsAreDone) {
   gate.Close(/*free_passes=*/1);
   faults->FailNth(FaultInjectionFileSystem::Op::kSync, 2);
   while (!Impl(*db).FlushPendingForTesting()) {
-    ASSERT_TRUE(db->Put({}, Key(written++), std::string(100, 'v')).ok());
+    ASSERT_TRUE(db->Put({}, ScatteredKey(written++), std::string(100, 'v')).ok());
   }
   gate.WaitForArrival();  // the job failed and is deleting
   ASSERT_FALSE(db->Put({}, "after", "x").ok()) << "the error is set";
@@ -829,14 +895,14 @@ TEST(CompactionShutdownTest, ShutdownAbandonsARunningCompaction) {
   std::unique_ptr<DB> db = std::move(OpenDB(options, "db", fs)).value();
   int written = 0;
   for (; written < 200; ++written) {
-    ASSERT_TRUE(db->Put({}, Key(written), std::string(20, 'v')).ok());
+    ASSERT_TRUE(db->Put({}, ScatteredKey(written), std::string(20, 'v')).ok());
   }
   ASSERT_TRUE(Impl(*db).FlushForTesting().ok());  // the first level-0 table
   // The second, by filling the memtable; writing stops at the switch, so no
   // third flush can queue up ahead of the compaction.
   gate.Close(/*free_passes=*/1);  // the flush passes; the compaction's first output waits
   while (!Impl(*db).FlushPendingForTesting() && Impl(*db).FlushesForTesting() < 2) {
-    ASSERT_TRUE(db->Put({}, Key(written), std::string(20, 'v')).ok());
+    ASSERT_TRUE(db->Put({}, ScatteredKey(written), std::string(20, 'v')).ok());
     ++written;
   }
   gate.WaitForArrival();
@@ -871,7 +937,7 @@ TEST(CompactionShutdownTest, ShutdownAbandonsARunningCompaction) {
 
   db = std::move(OpenDB(options, "db", fs)).value();
   for (int i = 0; i < written; ++i) {
-    ASSERT_EQ(Get(*db, Key(i)), std::string(20, 'v')) << i;
+    ASSERT_EQ(Get(*db, ScatteredKey(i)), std::string(20, 'v')) << i;
   }
 }
 

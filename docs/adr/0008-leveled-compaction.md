@@ -29,7 +29,10 @@ LevelDB's design ([impl.md](https://github.com/google/leveldb/blob/main/doc/impl
    pointer kept in memory only (a reopen restarts it; persisting it would need a new MANIFEST
    field for no correctness gain). Plus every table of level n+1 whose user-key range overlaps
    them. A single table with no overlap below moves down without being rewritten (a "trivial
-   move").
+   move"). So do all of level 0's tables at once when no two of them overlap and no table of
+   level 1 lies anywhere in their combined range: sequential writes flush such tables, which
+   were otherwise rewritten for nothing (added in Phase 5.3, after the first benchmarks showed
+   fillseq writing 220 MB of tables for 116 MB of data).
 3. **Outputs are cut only between user keys**, at about `target_file_size` (2 MiB). So in levels
    1 and below no user key is split between tables, and taking one table takes every version of
    its keys. (LevelDB cut anywhere and later needed "boundary inputs" to avoid moving the newer

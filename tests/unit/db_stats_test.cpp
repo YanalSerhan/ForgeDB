@@ -46,6 +46,11 @@ std::string Key(int i) {
   return "key" + std::string(7 - digits.size(), '0') + digits;
 }
 
+// Key i in a scattered order (distinct for i below 10,007), so level-0 tables
+// overlap and a compaction has to merge them (tables of sequential keys only
+// move down: ADR 0008, rule 2).
+std::string ScatteredKey(int i) { return Key(static_cast<int>((i * 7919LL) % 10007)); }
+
 // Only manual compactions.
 Options NoAutomaticCompaction() {
   Options options;
@@ -396,7 +401,7 @@ TEST(StatsTimeTest, AFlushInsideACompactionIsNotCompactionTime) {
   // The first level-0 table, with the gate open.
   int written = 0;
   for (; written < 200; ++written) {
-    ASSERT_TRUE(db->Put({}, Key(written), std::string(20, 'v')).ok());
+    ASSERT_TRUE(db->Put({}, ScatteredKey(written), std::string(20, 'v')).ok());
   }
   ASSERT_TRUE(Impl(*db).FlushForTesting().ok());
   // The second, by filling the memtable. Writing stops at the switch: one
@@ -404,7 +409,7 @@ TEST(StatsTimeTest, AFlushInsideACompactionIsNotCompactionTime) {
   // ahead of the compaction would take the gate's place (seen under Wine).
   gate.Close(/*free_passes=*/1);  // the flush passes; the compaction's first output waits
   while (!Impl(*db).FlushPendingForTesting() && Impl(*db).FlushesForTesting() < 2) {
-    ASSERT_TRUE(db->Put({}, Key(written++), std::string(20, 'v')).ok());
+    ASSERT_TRUE(db->Put({}, ScatteredKey(written++), std::string(20, 'v')).ok());
   }
   gate.WaitForArrival();
   // Queue a flush of keys the compaction does not have: only its table is

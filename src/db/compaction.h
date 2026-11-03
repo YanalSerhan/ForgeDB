@@ -62,11 +62,11 @@ struct Compaction {
   // `user_key`: then no older version of it exists outside the inputs.
   [[nodiscard]] bool IsBaseLevelForKey(std::string_view user_key) const;
 
-  // A single table with nothing to merge in the next level: it can simply
-  // move down.
-  [[nodiscard]] bool IsTrivialMove() const noexcept {
-    return inputs[0].size() == 1 && inputs[1].empty();
-  }
+  // Nothing to merge: no table of the next level overlaps the inputs, and no
+  // two inputs overlap each other (a single table; or level-0 tables with
+  // disjoint user-key ranges, as sequential writes make). The inputs can then
+  // move down as they are (ADR 0008, rule 2).
+  [[nodiscard]] bool IsTrivialMove() const noexcept;
 };
 
 // The round-robin pointers: the largest internal key compacted last, per level.

@@ -946,10 +946,12 @@ Status DBImpl::RunCompaction(const Compaction& compaction, bool allow_trivial_mo
     }
   }
   if (allow_trivial_move && compaction.IsTrivialMove()) {
-    // Nothing to merge: the table moves down a level as it is.
-    edit.added_files.push_back({.level = output_level, .file = compaction.inputs[0].front()});
+    // Nothing to merge: the tables move down a level as they are.
+    for (const FileMetaData& file : compaction.inputs[0]) {
+      edit.added_files.push_back({.level = output_level, .file = file});
+    }
     FORGEDB_RETURN_IF_ERROR(versions_->LogAndApply(edit));
-    edit.removed_files.clear();  // the table is still in use
+    edit.removed_files.clear();  // the tables are still in use
     RecordEdit(edit);
     ++stats->trivial_moves;
     return Status::OK();

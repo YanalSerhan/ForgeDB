@@ -17,7 +17,10 @@ namespace forgedb {
 
 class WinFileSystem final : public FileSystem {
  public:
-  WinFileSystem() = default;
+  // `map_reads`: NewRandomAccessFile's files read through a read-only memory
+  // mapping of the file (a copy from memory, no system call per read; ADR 0002,
+  // TODO 5.3). false: every read is a ReadFile call.
+  explicit WinFileSystem(bool map_reads = true) noexcept : map_reads_(map_reads) {}
 
   [[nodiscard]] Result<std::unique_ptr<WritableFile>> NewWritableFile(
       const std::filesystem::path& path) override;
@@ -37,6 +40,13 @@ class WinFileSystem final : public FileSystem {
   [[nodiscard]] Result<std::unique_ptr<FileLock>> LockFile(
       const std::filesystem::path& path) override;
   [[nodiscard]] Status UnlockFile(std::unique_ptr<FileLock> lock) override;
+
+ private:
+  bool map_reads_;
 };
+
+// Whether `file` (from a WinFileSystem's NewRandomAccessFile) reads through a
+// memory mapping. For tests.
+[[nodiscard]] bool IsMemoryMapped(const RandomAccessFile& file);
 
 }  // namespace forgedb

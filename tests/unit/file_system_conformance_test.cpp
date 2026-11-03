@@ -1,7 +1,8 @@
 // The FileSystem contract, checked against every implementation.
 //
 // Each test runs once per implementation (typed tests). WinFileSystem works in
-// a fresh directory under %TEMP%; MemFileSystem in a fresh in-memory tree; the
+// a fresh directory under %TEMP%, once with its memory-mapped reads and once
+// without; MemFileSystem in a fresh in-memory tree; the
 // FaultInjectionFileSystem wraps a MemFileSystem, with no faults injected. A
 // behavior they all must share belongs here; Windows-only details go in
 // win_file_system_test.cpp.
@@ -43,6 +44,18 @@ struct WinFileSystemSetup {
   static void RemoveRoot(const std::filesystem::path& root) {
     std::error_code ignored;
     std::filesystem::remove_all(root, ignored);
+  }
+};
+
+// WinFileSystem without its memory-mapped reads: every read a ReadFile call.
+struct WinUnmappedFileSystemSetup {
+  static constexpr const char* kName = "WinUnmapped";
+  static std::unique_ptr<FileSystem> MakeFileSystem() {
+    return std::make_unique<WinFileSystem>(/*map_reads=*/false);
+  }
+  static std::filesystem::path MakeRoot() { return WinFileSystemSetup::MakeRoot(); }
+  static void RemoveRoot(const std::filesystem::path& root) {
+    WinFileSystemSetup::RemoveRoot(root);
   }
 };
 
@@ -147,8 +160,8 @@ class SetupNames {
   }
 };
 
-using Implementations =
-    ::testing::Types<WinFileSystemSetup, MemFileSystemSetup, FaultInjectionFileSystemSetup>;
+using Implementations = ::testing::Types<WinFileSystemSetup, WinUnmappedFileSystemSetup,
+                                         MemFileSystemSetup, FaultInjectionFileSystemSetup>;
 TYPED_TEST_SUITE(FileSystemConformanceTest, Implementations, SetupNames);
 
 // --- Writing and reading -----------------------------------------------------
@@ -229,6 +242,8 @@ TYPED_TEST(FileSystemConformanceTest, FlushMakesDataVisibleToReaders) {
   ASSERT_TRUE(IsOk((*writer)->Append("def")));
   ASSERT_TRUE(IsOk((*writer)->Flush()));
   EXPECT_EQ(this->ReadAt(**reader, 3, 10), "def");
+  // Across the old end (WinFileSystem: from its mapping, then with ReadFile).
+  EXPECT_EQ(this->ReadAt(**reader, 1, 10), "bcdef");
   ASSERT_TRUE(IsOk((*writer)->Close()));
 }
 
