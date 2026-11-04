@@ -129,6 +129,76 @@ flush has happened, and ForgeDB keeps the log that flush retired until the next 
 record (ADR 0007), as well as the current one; LevelDB deletes the old log after the flush. The
 same retired log, up to one write buffer's worth, is a lead for the 13% in the unsynced results.
 
+## Phase 5.3: two optimizations
+
+Profiled with `scripts\cpu-profile.ps1` (Visual Studio's CPU sampling, Release build with
+symbols), then measured with `bench.ps1 -Modes unsynced -Engines forgedb`: ForgeDB alone,
+1,000,000 keys, 5 runs, median. **Before:** commit 45b186f, 2026-11-03 (High performance plan;
+Defender exclusion not confirmed). **After:** commit e016e15, 2026-11-04 (Balanced plan; the
+exclusion confirmed). The settings differ between the two runs; the first full run showed
+ForgeDB within a percent or two on Balanced and High performance (readrandom 90.0K and 89.6K
+ops/s), and the workloads neither change touches stayed within 2% here, so the differences
+below are the changes'.
+
+| ForgeDB, unsynced | before | after | change |
+|---|---|---|---|
+| readrandom, ops/s (p50 latency) | 89.6K (10.8 µs) | 137.5K (6.9 µs) | +53% |
+| seekrandom, ops/s (p50 latency) | 28.6K (34.8 µs) | 53.9K (18.4 µs) | +89% |
+| readseq, entries/s | 1.94M | 2.43M | +25% |
+| mixed (90% reads), ops/s | 97.5K | 155.7K | +60% |
+| readmissing, ops/s | 369K | 370K | none (no block is read) |
+| fillseq, ops/s | 157K | 164K | +4% |
+| fillseq, write amplification | 3.09 | **2.18** | tables written: 220 MB → 115 MB |
+| fillrandom, overwrite, ops/s | 147K, 139K | 145K, 136K | −1%, −2% |
+| fillrandom, overwrite, write amplification | 6.04, 8.61 | 6.04, 8.61 | none |
+
+### 1. Table blocks read from a memory mapping
+
+**Profile before.** In seekrandom (with its fillrandom setup), 61% of the samples were in the
+Windows kernel, and `Table::ReadDataBlock` took 54.7% of the time, nearly all of it in the
+`ReadFile` call under it. In readrandom, half of `DBImpl::Get`'s time (26% of all samples) was
+in `ReadFile`.
+
+**Change.** A table file is mapped read-only into memory when it is opened, and a read copies
+the requested bytes from the mapping instead of calling `ReadFile` (`src/env/win_file_system.cpp`;
+ADR 0002, rule 12). Copying (rather than handing out pointers into the mapping, as LevelDB does)
+keeps a disk error an `IOError`: the copy catches the in-page error Windows raises, and nothing
+above `src/env` changed.
+
+**After.** The deep kernel stacks under `ReadDataBlock` are gone from both profiles; what remains
+in the kernel is the log's `WriteFile` under `Put` in the setup fill. Point reads +53%, seeks
++89%, scans +25%. Absent keys, which the Bloom filters answer without reading a block, did not
+move: the gain is where the reads were.
+
+![readrandom, before](benchmarks/readrandom-flame-before.png)
+![readrandom, after](benchmarks/readrandom-flame-after.png)
+![seekrandom, before](benchmarks/seekrandom-flame-before.png)
+![seekrandom, after](benchmarks/seekrandom-flame-after.png)
+
+### 2. Level-0 tables that overlap nothing move down whole
+
+**Before.** A level-0 compaction rewrote every level-0 table, even when the tables overlapped
+neither each other nor level 1, as sequential writes make them: fillseq wrote 220 MB of tables
+(35 flushes and 59 compactions) for 116 MB of data.
+
+**Change.** Such tables now move to level 1 unchanged, as a single table already did from deeper
+levels (`Compaction::IsTrivialMove`; ADR 0008, rule 2).
+
+**After.** fillseq writes only its flushes (115 MB of tables; the 37 compactions are all moves),
+write amplification 2.18, the same as LevelDB's 2.18 in the first run. Throughput +4%. Random
+writes are unchanged, to the byte: their tables overlap, so they never qualified.
+
+Both changes keep the full test suite green in every preset (2026-11-03, commit e016e15: 567–570
+tests per preset, including new tests for each change).
+
+### Still behind
+
+These numbers compare ForgeDB with itself; the other engines are measured again in the final run.
+Against the first run's figures, LevelDB's point reads (344K ops/s) and seeks (142K) are still
+ahead of ForgeDB's 137.5K and 53.9K. Where the rest of that gap comes from has not been profiled
+yet; one difference is known: LevelDB hands out pointers into its mapping and skips the copy and
+the block cache, which ForgeDB keeps for its error handling.
+
 ## Running them
 
 Once per machine, in an administrator PowerShell (run `bench.ps1` from one too: reading
