@@ -4,15 +4,19 @@
 
 ForgeDB is a crash-safe, embedded key-value storage engine based on a log-structured merge tree
 (LSM tree), written in C++20 for Windows 10/11 x64 on NTFS. Writes go to a checksummed write-ahead
-log with group commit and into a skip-list memtable that readers search without locks. Full
-memtables are flushed to immutable, sorted table files with bloom filters, and a MANIFEST records
-which files are live, so the database recovers to a consistent state after a crash. The core
-library has no third-party dependencies.
+log with group commit and into a skip-list memtable that readers search without locks. A
+background thread flushes full memtables to immutable, sorted table files with bloom filters and
+compacts them through seven levels; a MANIFEST records which files are live, so the database
+recovers to a consistent state after a crash. Reads can use snapshots, and table files are read
+through memory mappings. The core library has no third-party dependencies.
 
-**Status: Phase 5 closed: benchmarked against RocksDB, LevelDB and SQLite
-([docs/benchmarks.md](docs/benchmarks.md)), with two optimizations from profiling; Phase 6
-(write-up and release) is next.** Not for production use.
-See [TODO.md](TODO.md) for the plan.
+It is a learning and portfolio project, built in phases with a test for every behavior
+([TODO.md](TODO.md) records each phase and how it was measured). **Not for production use.**
+
+**Documentation:** [architecture](docs/architecture.md) (write path, read path, threading,
+versions and snapshots), [file formats](docs/file-formats.md) (every byte),
+[decision records](docs/adr/README.md) (why), [benchmarks](docs/benchmarks.md) (against
+RocksDB, LevelDB and SQLite, and where ForgeDB loses).
 
 ```cpp
 #include "forgedb/db.h"
@@ -70,23 +74,49 @@ flowchart LR
   record has followed the compaction's (ADR 0008).
 - **Reads.** A `Get` looks in the memtable, the immutable memtable, then the level-0 tables
   newest first, then the one table of each deeper level whose range holds the key (each skipped
-  by its bloom filter when it cannot hold the key). An iterator merges
-  all of them and hides older versions and deletions. A read holds the DB's mutex only to take
-  its view (memtables, table list, sequence number), never during I/O. A read at a snapshot uses
-  the snapshot's sequence number instead of the latest; the table list it takes stays alive
-  (and its files on disk) for as long as the read needs it.
+  by its bloom filter when it cannot hold the key). Table files are memory-mapped, so a block
+  read is a copy from memory, not a system call; a disk error still comes back as an error, not
+  a crash. An iterator merges all of them and hides older versions and deletions. A read holds
+  the DB's mutex only to take its view (memtables, table list, sequence number), never during
+  I/O. A read at a snapshot uses the snapshot's sequence number instead of the latest; the table
+  list it takes stays alive (and its files on disk) for as long as the read needs it.
 - **Recovery.** The newest MANIFEST with a complete snapshot wins (CURRENT is only a hint,
   because Windows does not document that a rename survives a power loss). The logs written since
   the last flush are replayed; the newest may end at a torn write, which is dropped and reported.
   What was recovered goes into a new table and a new MANIFEST, and leftover files are deleted.
 
-Byte layouts: [docs/file-formats.md](docs/file-formats.md). Decisions and their reasons:
+More in [docs/architecture.md](docs/architecture.md); byte layouts in
+[docs/file-formats.md](docs/file-formats.md); decisions and their reasons in
 [docs/adr/](docs/adr/README.md).
+
+## Results
+
+Against RocksDB 11.8.1, LevelDB and SQLite 3.53.4 on one laptop (Intel Core i7-10750H, NVMe SSD,
+Windows 11): 1,000,000 keys of 16 bytes with 100-byte values, one thread, writes not synced, the
+same cache, write buffer and Bloom filters for every engine, median of 5 runs.
+[docs/benchmarks.md](docs/benchmarks.md) has every workload, the charts, the method, and the
+analysis.
+
+| Operations per second | ForgeDB | RocksDB | LevelDB | SQLite |
+|---|---|---|---|---|
+| Random writes (fillrandom) | 155K | 110K | **163K** | 6.1K |
+| Overwrites | 154K | 105K | **155K** | 8.7K |
+| Point reads (readrandom) | 188K | 70K | **351K** | 65K |
+| Absent keys (readmissing) | 436K | **573K** | 481K | 66K |
+| Seek + 10 entries (seekrandom) | 60K | 37K | **142K** | 49K |
+| Full scan, entries/s (readseq) | 2.55M | 2.74M | **4.06M** | 2.35M |
+| Write amplification, random writes | **6.04** | 6.43 | 6.32 | 115 |
+
+ForgeDB is ahead of RocksDB and SQLite on writes and point reads, and behind LevelDB on reads,
+seeks and scans (1.6–2.4 times), for reasons the benchmark page goes through. Profiling in Phase
+5 found that half of a point read's time was a system call per block; reading table files through
+memory mappings made point reads 53% faster and seeks 89% faster. Synced writes are bound by the
+drive: about 1,600–1,750 per second at best, whatever the engine.
 
 ## Features, with measured numbers
 
 Numbers are from one machine (Intel Core i7-10750H laptop, `msvc-release`) unless marked Linux;
-they are recorded in [TODO.md](TODO.md) with how they were measured.
+they are recorded in [TODO.md](TODO.md) with how they were measured, and the phase they come from.
 
 - **Crash safety, tested by simulation.** A fault-injection file system models what Windows
   documents about power loss and crashes (ADR 0002), including unsynced data dropped, torn or
@@ -99,12 +129,8 @@ they are recorded in [TODO.md](TODO.md) with how they were measured.
 - **Write amplification.** 1,000,000 random 16-byte keys with 100-byte values, default options,
   unsynced: 5.26–5.37 bytes written to tables per byte written by the user once compaction has
   settled (5.08–5.18 when the last write returns), at 137–142 k writes/s with no stalls (3 runs;
-  `BM_FillRandomWriteAmplification`).
-- **Against RocksDB, LevelDB and SQLite** (1,000,000 keys, unsynced, one thread, 5 runs;
-  [docs/benchmarks.md](docs/benchmarks.md)): random writes 155K/s (LevelDB 163K, RocksDB 110K,
-  SQLite 6.1K); point reads 188K/s (LevelDB 351K, RocksDB 70K, SQLite 65K); seeks with a 10-entry
-  scan 60K/s (LevelDB 142K, SQLite 49K, RocksDB 37K). Where ForgeDB loses, and why, is written
-  there too.
+  `BM_FillRandomWriteAmplification`, Phase 4). Sequential writes are never rewritten: sorted
+  tables move down a level whole (write amplification 2.18 with the log counted, as LevelDB's).
 - **Bloom filters.** 10 bits per key: 0.817% false positives at 100,000 keys (Linux; 0.82%
   predicted). A `Get` for a missing key read a data block 845 times in 100,000.
 - **Corruption detection.** Every log fragment, table block and footer has a CRC-32C. The
@@ -120,7 +146,7 @@ they are recorded in [TODO.md](TODO.md) with how they were measured.
   `delete`, `scan` and `stats` (tables per level, statistics, and what recovery found) from the
   command line.
 
-## Building on Windows
+## Quick start: build and test on Windows
 
 ### Prerequisites (one time)
 
@@ -147,9 +173,10 @@ $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 $env:VCPKG_ROOT = "C:\vcpkg"   # the developer shell may point this at Visual Studio's own vcpkg
 ```
 
-### Configure, build, test
+### Clone, configure, build, test
 
 ```powershell
+git clone https://github.com/YanalSerhan/ForgeDB C:\path\to\ForgeDB
 cd C:\path\to\ForgeDB
 cmake --preset msvc-debug        # first run also builds GoogleTest through vcpkg (a few minutes)
 cmake --build --preset msvc-debug
@@ -170,6 +197,26 @@ ctest --preset msvc-debug
 
 Build output goes to `out/build/<preset>/`. Microbenchmarks (release preset only):
 `out\build\msvc-release\bench\forgedb_microbench.exe`.
+
+### Reproduce the benchmarks
+
+```powershell
+# Once, in an administrator PowerShell: keep Defender out of the benchmark's folder, and use
+# the High performance power plan (or Settings > System > Power > Power mode: Best performance).
+Add-MpPreference -ExclusionPath C:\path\to\ForgeDB\out\bench-db
+powercfg /setactive SCHEME_MIN
+pip install matplotlib            # for the charts (optional)
+
+# A quick look (the first run also builds RocksDB through vcpkg, about 15 minutes):
+powershell -ExecutionPolicy Bypass -File scripts\bench.ps1 -Runs 1 -Num 100000 -SyncNum 2000
+
+# The full run behind the results above (several hours: the first full run took about 4 h 20 min);
+# plugged in, other heavy programs closed:
+powershell -ExecutionPolicy Bypass -File scripts\bench.ps1 -SyncNum 20000
+```
+
+Results, charts and a `machine.json` record go to `out\bench\<date-time>\`; the method is in
+[docs/benchmarks.md](docs/benchmarks.md#method).
 
 To configure, build and test **every** preset in one go (it sets up the x64 developer environment
 itself, prints a summary table and writes logs to `out\logs\`):
@@ -192,7 +239,7 @@ powershell -ExecutionPolicy Bypass -File scripts\coverage.ps1            # after
                                                                          # needs: choco install opencppcoverage
 powershell -ExecutionPolicy Bypass -File scripts\fuzz.ps1                # 1 hour per fuzz target; -Seconds N
 powershell -ExecutionPolicy Bypass -File scripts\bench.ps1               # ForgeDB vs RocksDB, LevelDB, SQLite;
-                                                                         # 1-2 hours; see docs/benchmarks.md
+                                                                         # several hours; see docs/benchmarks.md
 powershell -ExecutionPolicy Bypass -File scripts\cpu-profile.ps1         # CPU profile of one workload on ForgeDB
                                                                          # (Visual Studio's profiler); -Workload X
 ```
@@ -244,10 +291,12 @@ forgedb_bench [--engine=forgedb,rocksdb,leveldb,sqlite] [--workloads=...] [--num
 
 Every `forgedb_cli` command opens the database and so runs recovery: writes left in the log
 become a level-0 table. The statistics `stats` prints count from that open, so they show what the
-command's own open did (a compaction it set off, for example; not the recovery table). Output is UTF-8; `scan` escapes bytes that are not printable ASCII.
+command's own open did (a compaction it set off, for example; not the recovery table). Output is
+UTF-8; `scan` escapes bytes that are not printable ASCII.
 
 ## Known limitations
 
+- Windows 10/11 x64 only, built with MSVC or clang-cl (ADR 0001). Not for production use.
 - One process per database (enforced by the `LOCK` file); no transactions beyond an atomic
   `WriteBatch`.
 - Power-loss safety is verified with a simulated file system; real behavior also depends on the
@@ -264,13 +313,21 @@ command's own open did (a compaction it set off, for example; not the recovery t
 - File systems without POSIX delete semantics (FAT32, some network shares) keep a removed file's
   name until its last handle closes (ADR 0002, rule 7). Paths are limited to `MAX_PATH` unless
   Windows long paths are enabled.
+- A disk error while reading a memory-mapped table should come back as an `IOError` (ADR 0002,
+  rule 12), but no test can make a disk fail, so that path is untested.
+- The benchmarks come from one laptop and one SSD. Synced-write speed there depends on which of
+  two flush times the drive gives, in a pattern that is not explained
+  ([docs/benchmarks.md](docs/benchmarks.md#results-synced-writes-2026-11-05)).
 
 ## Continuous integration
 
-GitHub Actions on `windows-2025-vs2026` (`.github/workflows/ci.yml`): one job per preset running
-`scripts\build-all.ps1` (the `clangcl-fuzz` job runs the fuzz smoke test), a coverage job
-(OpenCppCoverage, report uploaded as an artifact), and a clang-format check. vcpkg packages are cached between runs. ASan builds include a canary test
-that overflows a heap buffer on purpose and passes only if ASan reports it.
+GitHub Actions on `windows-2025-vs2026` (`.github/workflows/ci.yml`; the badge at the top is this
+workflow): one job per preset running `scripts\build-all.ps1`, so every build with warnings as
+errors, the tests in the debug, release and both ASan builds, clang-tidy and `/analyze`, and the
+fuzz smoke test in the `clangcl-fuzz` job; a coverage job (OpenCppCoverage, fails below 85% of
+lines, report uploaded as an artifact); and a clang-format check. vcpkg packages are cached
+between runs. ASan builds include a canary test that overflows a heap buffer on purpose and
+passes only if ASan reports it.
 
 **Troubleshooting.** Other toolchains on `PATH` can shadow Visual Studio's tools; Strawberry Perl,
 for example, ships its own `cmake.exe`, `ninja.exe`, `gcc` and `ld.exe`. `build-all.ps1` puts

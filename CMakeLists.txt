@@ -26,7 +26,7 @@ if(FORGEDB_BENCH_ENGINES)
 endif()
 
 project(ForgeDB
-  VERSION 0.1.0
+  VERSION 1.0.0
   DESCRIPTION "Crash-safe embedded LSM-tree key-value storage engine for Windows"
   LANGUAGES CXX)
 

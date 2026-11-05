@@ -47,6 +47,12 @@ Code: `src/db/filename.*`, `OpenDB` in `src/db/db_impl.cpp`. Tests: `tests/unit/
   edit adding it and naming the new log is appended to the MANIFEST (synced). The old log is
   deleted after the *next* flush's edit is synced (or by the next open), so that the data of a
   MANIFEST's last record is always still in a log (ADR 0007, rule 5).
+- **Compaction (Phase 4.3; ADR 0008).** Its output tables are written and synced, then one
+  version edit removing the input tables and adding the outputs is appended to the MANIFEST
+  (synced). A move (a table that overlaps nothing in the next level; since 5.3 also several
+  level-0 tables that overlap nothing) writes no table: its edit removes the file from one level
+  and adds the same file, unchanged, to the next. Input tables are deleted once no version in
+  use lists them and another MANIFEST record has followed the edit (or by the next open).
 - A database written before Phase 3.6 (logs, no MANIFEST) opens like this with every log replayed.
 
 ## Primitive encodings
@@ -390,7 +396,8 @@ puts the scalars first):
 | 4 | removed file | varint32 level, varint64 file number |
 | 5 | added file | varint32 level, varint64 file number, varint64 file size, length-prefixed smallest internal key, length-prefixed largest internal key |
 
-- Levels are 0 to 6. Only level 0 is used before Phase 4; level-0 files may overlap.
+- Levels are 0 to 6. Level-0 files may overlap; in levels 1 to 6 the files are sorted and never
+  share a user key (ADR 0008).
 - Decoding is strict: an unknown tag, a truncated value, a scalar given twice, a level out of
   range, a key that is not a valid internal key, or a smallest key after the largest is
   `Corruption`.

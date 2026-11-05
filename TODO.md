@@ -377,12 +377,12 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 
 ## Phase 6 — Write-up and release (≈1 week)
 
-- [ ] README: what it is, architecture diagram, feature list, results table, quick start, how to run tests and benchmarks
-- [ ] `docs/architecture.md`: write path, read path, threading, versions and snapshots
-- [ ] `docs/file-formats.md`: complete byte layouts for log, block, table, footer, MANIFEST
-- [ ] `docs/adr/README.md`: index of all ADRs
-- [ ] `LIMITATIONS.md` (or a README section): see "Known limitations" below
-- [ ] All CI badges on the README: build, tests, ASan, coverage, fuzz smoke
+- [x] README: what it is, architecture diagram, feature list, results table, quick start, how to run tests and benchmarks
+- [x] `docs/architecture.md`: write path, read path, threading, versions and snapshots
+- [x] `docs/file-formats.md`: complete byte layouts for log, block, table, footer, MANIFEST
+- [x] `docs/adr/README.md`: index of all ADRs
+- [x] `LIMITATIONS.md` (or a README section): see "Known limitations" below
+- [x] ~~All CI badges on the README: build, tests, ASan, coverage, fuzz smoke~~ One badge for the one workflow, which runs all of them; the README's CI section says what it checks
 - [ ] Tag `v1.0.0` with release notes
 - [ ] CV line updated with real numbers (crash iterations, ops/sec, write amplification, comparison)
 - [ ] Practise the interview talking points out loud (see the plan doc)
@@ -404,13 +404,16 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 
 ## Known limitations (keep this list honest and in the README)
 
-- [ ] Single process per database (enforced by the `LOCK` file)
-- [ ] No transactions beyond atomic `WriteBatch`
-- [ ] Power-loss safety is verified with a simulated file system; real behaviour also depends on the drive's write cache
-- [ ] No data-race detector on Windows; concurrency is verified by design, stress tests and assertions (since 4.6 also by Clang's thread-safety analysis in the clang-cl builds: ADR 0009)
-- [ ] Durability needs a drive that honors flush requests; "Turn off Windows write-cache buffer flushing" voids it (ADR 0002, F4)
-- [ ] File systems without POSIX delete (FAT32, some network shares, Wine) keep a removed file's name until its last handle closes (ADR 0002, rule 7)
-- [ ] Database paths are limited to MAX_PATH unless Windows long paths are enabled
-- [ ] Real damage (not a crash) in the newest log drops the writes after it instead of failing the open (point-in-time, reported in `RecoveryInfo`; ADR 0004 rule 6)
-- [ ] Snapshots are not saved: they end when the DB is closed
-- [ ] A newest log truncated exactly at a record boundary looks like a log whose last writes never reached the disk: those writes are lost without a report (found by the corruption suite, 3.9)
+- [x] Single process per database (enforced by the `LOCK` file)
+- [x] No transactions beyond atomic `WriteBatch`
+- [x] Power-loss safety is verified with a simulated file system; real behaviour also depends on the drive's write cache
+- [x] No data-race detector on Windows; concurrency is verified by design, stress tests and assertions (since 4.6 also by Clang's thread-safety analysis in the clang-cl builds: ADR 0009)
+- [x] Durability needs a drive that honors flush requests; "Turn off Windows write-cache buffer flushing" voids it (ADR 0002, F4)
+- [x] File systems without POSIX delete (FAT32, some network shares, Wine) keep a removed file's name until its last handle closes (ADR 0002, rule 7)
+- [x] Database paths are limited to MAX_PATH unless Windows long paths are enabled
+- [x] Real damage (not a crash) in the newest log drops the writes after it instead of failing the open (point-in-time, reported in `RecoveryInfo`; ADR 0004 rule 6)
+- [x] Snapshots are not saved: they end when the DB is closed
+- [x] A newest log truncated exactly at a record boundary looks like a log whose last writes never reached the disk: those writes are lost without a report (found by the corruption suite, 3.9)
+- [x] Windows 10/11 x64 only (ADR 0001)
+- [x] A disk error while reading a memory-mapped table should come back as an `IOError` (ADR 0002 rule 12), but no test can make a disk fail: untested (5.3)
+- [x] Benchmarks from one laptop and one SSD; the two synced flush times and their pattern are not explained (5.2)

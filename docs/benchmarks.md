@@ -230,9 +230,9 @@ The script builds `forgedb_bench` with the `msvc-bench` preset (Release; the fir
 RocksDB through vcpkg, about 15 minutes), checks the power plan, AC power and the Defender
 exclusion (it warns, it never changes them), records the machine, runs everything, and draws the
 charts. The results go to `out\bench\<date-time>\`: `machine.json`, `unsynced.json`,
-`synced.json`, their console logs, `*.png` and `results.md`. Expect one to two hours with the
-defaults; `-Runs 1 -Num 100000` gives a quick look, and `python bench\plot.py <folder>` redraws the
-charts.
+`synced.json`, their console logs, `*.png` and `results.md`. Expect several hours with the
+defaults (the first full run took about 4 h 20 min); `-Runs 1 -Num 100000` gives a quick look,
+and `python bench\plot.py <folder>` redraws the charts.
 
 ## Method
 
