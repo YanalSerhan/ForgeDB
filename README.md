@@ -9,8 +9,9 @@ memtables are flushed to immutable, sorted table files with bloom filters, and a
 which files are live, so the database recovers to a consistent state after a crash. The core
 library has no third-party dependencies.
 
-**Status: Phase 4 closed (snapshots, background flushes, leveled compaction, statistics, the
-stress test, and compile-time lock checking); Phase 5 (benchmarks and tuning) is next.** Not for production use.
+**Status: Phase 5 closed: benchmarked against RocksDB, LevelDB and SQLite
+([docs/benchmarks.md](docs/benchmarks.md)), with two optimizations from profiling; Phase 6
+(write-up and release) is next.** Not for production use.
 See [TODO.md](TODO.md) for the plan.
 
 ```cpp
@@ -99,6 +100,11 @@ they are recorded in [TODO.md](TODO.md) with how they were measured.
   unsynced: 5.26–5.37 bytes written to tables per byte written by the user once compaction has
   settled (5.08–5.18 when the last write returns), at 137–142 k writes/s with no stalls (3 runs;
   `BM_FillRandomWriteAmplification`).
+- **Against RocksDB, LevelDB and SQLite** (1,000,000 keys, unsynced, one thread, 5 runs;
+  [docs/benchmarks.md](docs/benchmarks.md)): random writes 155K/s (LevelDB 163K, RocksDB 110K,
+  SQLite 6.1K); point reads 188K/s (LevelDB 351K, RocksDB 70K, SQLite 65K); seeks with a 10-entry
+  scan 60K/s (LevelDB 142K, SQLite 49K, RocksDB 37K). Where ForgeDB loses, and why, is written
+  there too.
 - **Bloom filters.** 10 bits per key: 0.817% false positives at 100,000 keys (Linux; 0.82%
   predicted). A `Get` for a missing key read a data block 845 times in 100,000.
 - **Corruption detection.** Every log fragment, table block and footer has a CRC-32C. The

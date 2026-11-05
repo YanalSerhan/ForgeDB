@@ -368,8 +368,10 @@ with MSVC and clang-cl. No Linux, no WSL, no drivers, no admin rights.
 - [x] Every optimization keeps the full test suite green (2026-11-03, commit e016e15: all eight presets build with no warnings; 567–570 tests per test preset pass, and the fuzz smoke runs)
 
 ### ✅ Exit gate — Phase 5
-- [ ] `docs/benchmarks.md` has comparison charts for all workloads, both sync modes
-- [ ] Includes an honest section on where ForgeDB loses and why
+- [x] `docs/benchmarks.md` has comparison charts for all workloads, both sync modes (final run 2026-11-05, commit 9560246, all four engines, set up as the method asks: throughput, p99 latency, write and space amplification for the 8 unsynced workloads at 1,000,000 keys; the synced mode covers the 4 write workloads at 20,000 keys, since reads do not depend on it)
+- [x] Includes an honest section on where ForgeDB loses and why ("Where ForgeDB loses, and why": point reads and seeks behind LevelDB by 1.9× and 2.4×, scans behind LevelDB and RocksDB, absent keys behind RocksDB, fills 5–7% behind LevelDB, space amplification 1.13 with only part of it explained; with what is known, what is a hypothesis and what was not investigated)
+
+> Phase 5 closed (2026-11-05): every item and exit-gate check met. ForgeDB, against the first run: point reads 90K → 188K ops/s, seeks 28K → 60K, scans 1.89M → 2.55M entries/s, fillseq write amplification 3.09 → 2.18 (two Phase 5.3 changes, full suite green in all presets). Open, and written down in `docs/benchmarks.md`: synced writes on this laptop take one of two flush times, and which runs get the slow one follows a pattern by engine and workload whose cause is unknown (a disk-level trace would tell); the rest of the space amplification; the remaining read gap to LevelDB.
 
 ---
 

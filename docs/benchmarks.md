@@ -4,40 +4,52 @@ ForgeDB against RocksDB, LevelDB and SQLite on one Windows machine, with the sam
 same data and the same settings where the engines have them. Everything here comes from
 `scripts\bench.ps1` and `bench\plot.py`; the numbers are measured, never estimated.
 
-## Results: unsynced writes (first run, 2026-11-02)
+## Results: unsynced writes (2026-11-05)
 
-**Status.** The first full run, before any Phase 5.3 optimization (commit 314d43e). The final
-numbers come from a run after 5.3, on the final code, with the machine set up as described
-below. Synced writes: [their own section](#results-synced-writes-2026-11-02).
+**Run.** The final code (commit 9560246; the engine as of Phase 5.3's commit e016e15), set up as
+the [method](#method) asks: High performance power plan, AC power, the database folder excluded
+from Defender's scanning (confirmed), runs interleaved across engines. It replaces the first run
+of 2026-11-02 (commit 314d43e, before Phase 5.3), whose tables are in this file's history.
 
 **Machine.** Dell G5 5500 laptop: Intel Core i7-10750H (6 cores, 12 threads), 15.8 GB RAM at
-2933 MHz, SK hynix PC611 1 TB NVMe SSD; Windows 11 Home 25H2 (build 26200.9711), on AC power.
-MSVC 19.51 (Visual Studio 18), Release (`/O2 /Ob2`); RocksDB 11.8.1, LevelDB (vcpkg 2026-03-11),
-SQLite 3.53.4. **Two departures from the method:** the power plan was Balanced, not High
-performance, and whether Defender skipped the database folder could not be read (the script
-did not run as an administrator). Both would affect every engine; across the 5 runs, most
-results vary by a few percent, far less than the gaps between engines.
+2933 MHz, SK hynix PC611 1 TB NVMe SSD; Windows 11 Home 25H2 (build 26200.9711). MSVC 19.51
+(Visual Studio 18), Release (`/O2 /Ob2`); RocksDB 11.8.1, LevelDB (vcpkg 2026-03-11), SQLite
+3.53.4.
 
 1,000,000 keys of 16 B with 100-byte values, one thread, 8 MiB cache, 4 MiB write buffer, 10-bit
 Bloom filters, no compression, unsynced. Median [lowest–highest] of 5 runs.
 
 | ops/s | ForgeDB | RocksDB | LevelDB | SQLite |
 |---|---|---|---|---|
-| fillseq | 160K [130K–176K] | 126K [125K–127K] | 183K [178K–184K] | 21.3K [20.8K–24.2K] |
-| fillrandom | 151K [145K–151K] | 107K [98.9K–109K] | 154K [153K–155K] | 5,879 [5,858–5,904] |
-| overwrite | 136K [134K–136K] | 102K [100K–103K] | 143K [142K–146K] | 8,525 [8,437–8,596] |
-| readrandom | 90K [86.8K–91.8K] | 66.8K [66K–67.8K] | 344K [333K–351K] | 53.9K [53.3K–59.3K] |
-| readmissing | 358K [352K–366K] | 486K [479K–497K] | 405K [396K–408K] | 54.9K [53.1K–55.6K] |
-| readseq | 1.89M [1.79M–1.92M] | 2.57M [2.53M–2.66M] | 3.79M [3.7M–3.83M] | 2.26M [2.2M–2.36M] |
-| seekrandom | 28K [27K–28.9K] | 36.9K [36.2K–37.1K] | 142K [141K–143K] | 46.8K [46.3K–46.9K] |
-| mixed | 95.2K [94.1K–96.3K] | 64.8K [63.8K–65.7K] | 228K [205K–231K] | 37.1K [35.9K–38K] |
+| fillseq | 180K [177K–183K] | 128K [122K–130K] | 193K [189K–198K] | 27.3K [23.6K–27.8K] |
+| fillrandom | 155K [145K–158K] | 110K [108K–111K] | 163K [159K–168K] | 6,078 [5,949–6,149] |
+| overwrite | 154K [151K–155K] | 105K [102K–106K] | 155K [153K–159K] | 8,743 [8,534–8,950] |
+| readrandom | 188K [182K–192K] | 70.2K [68.2K–71.5K] | 351K [333K–372K] | 64.8K [58.7K–66.9K] |
+| readmissing | 436K [311K–469K] | 573K [424K–604K] | 481K [416K–498K] | 65.7K [64.1K–69.5K] |
+| readseq | 2.55M [2.43M–2.66M] | 2.74M [2.7M–2.82M] | 4.06M [4.02M–4.11M] | 2.35M [2.23M–2.47M] |
+| seekrandom | 59.8K [58.2K–60.9K] | 36.8K [36K–37.6K] | 142K [120K–147K] | 49.2K [48.1K–51K] |
+| mixed | 181K [176K–194K] | 70.2K [69.1K–71.6K] | 251K [237K–253K] | 40.6K [40.3K–40.9K] |
+
+| p99 latency, µs | ForgeDB | RocksDB | LevelDB | SQLite |
+|---|---|---|---|---|
+| fillrandom | 20.5 | 18.4 | 20.5 | 156 |
+| readrandom | 9.73 | 34.8 | 6.66 | 34.8 |
+| readmissing | 7.17 | 13.8 | 6.14 | 34.8 |
+| seekrandom | 29.7 | 59.4 | 12.3 | 43 |
+| mixed | 12.8 | 34.8 | 17.4 | 45.1 |
 
 | write amplification | ForgeDB | RocksDB | LevelDB | SQLite |
 |---|---|---|---|---|
-| fillseq | 3.09 | 2.19 | 2.18 | 54.3 |
+| fillseq | 2.18 | 2.19 | 2.18 | 54.3 |
 | fillrandom | 6.04 [6.02–6.12] | 6.43 | 6.32 [6.30–6.34] | 115 |
 | overwrite | 8.61 [8.51–8.64] | 11.2 | 8.03 [8.02–8.12] | 70.3 |
-| mixed | 10.5 [10.1–10.5] | 12.1 | 44.6 [44.4–45.0] | 70.3 |
+| mixed | 10.5 [10.1–10.5] | 12.1 | 44.7 [44.5–44.9] | 70.3 |
+
+| space amplification | ForgeDB | RocksDB | LevelDB | SQLite |
+|---|---|---|---|---|
+| fillseq | 1.04 | 0.998 | 0.992 | 1.22 |
+| fillrandom | 1.13 [1.11–1.15] | 0.999 | 0.993 | 1.21 |
+| overwrite | 1.32 [1.32–1.39] | 1.00 | 1.15 [1.14–1.15] | 1.21 |
 
 ![Throughput, unsynced](benchmarks/throughput-unsynced.png)
 ![p99 latency, unsynced](benchmarks/latency-p99-unsynced.png)
@@ -46,88 +58,82 @@ Bloom filters, no compression, unsynced. Median [lowest–highest] of 5 runs.
 
 ### Where ForgeDB wins
 
-- **Writes.** ForgeDB writes as fast as LevelDB (fillrandom 151K vs 154K ops/s) and about 40%
-  faster than RocksDB (107K), with the lowest write amplification in fillrandom (6.04; LevelDB's
-  is lower in overwrite, 8.03 against 8.61). RocksDB's adapter keeps its statistics switched on
-  (for the counters the benchmark reports), which costs RocksDB some of that gap; how much was
-  not measured.
-- **Against RocksDB's reads.** readrandom 90K vs 66.8K ops/s, and mixed 95.2K vs 64.8K.
+- **Writes, against RocksDB and SQLite.** 40–47% more writes per second than RocksDB (fillrandom
+  155K vs 110K, overwrite 154K vs 105K), and the lowest write amplification in fillrandom (6.04).
+  RocksDB's adapter keeps its statistics switched on (for the counters the benchmark reports),
+  which costs RocksDB some of that gap; how much was not measured.
+- **Reads, against RocksDB and SQLite.** Point reads 2.7 times RocksDB's (188K vs 70.2K ops/s,
+  p99 9.7 µs vs 34.8 µs) and 2.9 times SQLite's; seeks second of the four (59.8K, against 49.2K
+  for SQLite and 36.8K for RocksDB); mixed 181K against 70.2K and 40.6K.
+- **Sequential writes are written once.** fillseq write amplification 2.18, as LevelDB's and
+  RocksDB's (it was 3.09 before Phase 5.3).
 
 ### Where ForgeDB loses, and why
 
-- **Point reads: LevelDB is 3.8 times as fast** (readrandom 344K vs 90K ops/s; typical latency
-  2.4 µs vs 11.3 µs), and mixed follows (228K vs 95.2K). The data is 14 times the 8 MiB block
-  cache, so most random reads need a block from a table file. ForgeDB does that with a
-  `ReadFile` call per block; LevelDB on 64-bit Windows maps up to 1,000 table files into memory
-  and reads blocks from the mapping, with no system call (`util/env_windows.cc`, the vcpkg
-  version). RocksDB, which also reads with a call per block, has a typical latency close to
-  ForgeDB's (13.8 µs). That points to the read path; profiling in 5.3 is to confirm it. A second
-  possible factor: LevelDB keeps compacting during reads (below), which may leave fewer tables
-  for a read to look in.
-- **Seeks and scans: the slowest of the four.** seekrandom 28K ops/s, against 36.9K (RocksDB),
-  46.8K (SQLite) and 142K (LevelDB); readseq 1.89M entries/s, against 2.26M to 3.79M. A seek
-  reads a block from every level that has the key range, so it pays the per-block cost several
-  times; why ForgeDB is behind RocksDB here as well is for the profiler.
-- **Absent keys: RocksDB is faster** (readmissing 486K vs 358K ops/s). These are answered by the
-  Bloom filters without reading a block; RocksDB's filter differs from ForgeDB's (and LevelDB's).
-  Not investigated yet.
-- **Sequential writes rewrite data.** In fillseq, ForgeDB wrote 220 MB of tables (flushes and
-  compactions) for 116 MB of data; LevelDB and RocksDB wrote 110 and 116 MB, their flushes only,
-  because sorted tables that overlap nothing below can move down a level whole. ForgeDB compacts
-  all of level 0 at once and does not move whole tables, hence write amplification 3.09 against
-  2.19.
-- **Space: 13% over the data after fillrandom** (1.13, against 1.00 for RocksDB and 1.01 for
-  LevelDB). fillrandom writes every key once, so this is not old versions of keys. One lead:
-  ForgeDB keeps the log its last flush retired (see the synced results, below); not confirmed.
+- **Point reads and seeks: LevelDB is 1.9 and 2.4 times as fast** (readrandom 351K vs 188K
+  ops/s, typical latency 2.6 µs vs 5.1 µs; seekrandom 142K vs 59.8K), and mixed follows (251K vs
+  181K). Both engines now read table blocks from memory-mapped files (Phase 5.3 halved ForgeDB's
+  gap). Two differences remain that are known, not measured: ForgeDB copies each block out of the
+  mapping and keeps it in its block cache, which keeps a disk error an error instead of a crash;
+  LevelDB uses the mapped bytes in place and does not put those blocks in its block cache. And LevelDB keeps compacting while it
+  only reads (below), which may leave fewer tables for a read to look in. Not profiled further.
+- **Scans: LevelDB is 1.6 times as fast, RocksDB 7%** (readseq 4.06M and 2.74M entries/s vs
+  2.55M). Not profiled.
+- **Absent keys: RocksDB is 1.3 times as fast** (readmissing 573K vs 436K ops/s; typical latency
+  1.3 µs vs 2.0 µs). These are answered by the Bloom filters without reading a block; RocksDB's
+  filter is a different design from ForgeDB's (and LevelDB's). Not investigated.
+- **Writes: LevelDB is 5–7% faster** in the fills (fillseq 193K vs 180K, fillrandom 163K vs 155K;
+  overwrite is even). Not investigated.
+- **Space: 13% over the data after fillrandom** (1.13, against 0.99–1.00 for LevelDB and RocksDB),
+  and 32% after overwrite. fillrandom writes every key once, so this is not old versions of keys.
+  One lead: ForgeDB keeps the log its last flush retired until the next MANIFEST record (ADR 0007),
+  up to one write buffer's worth (4 MiB, about 4% of this data), where LevelDB deletes it after
+  the flush. The rest is not explained.
 
 ### The other engines
 
 - **LevelDB compacts while it only reads.** During readrandom, with no writes at all, LevelDB's
-  compactions wrote 133 MB, and 121 MB during seekrandom: its seek-triggered compactions, which
-  compact a table that reads keep having to look into before finding their key in a deeper
-  level. The same
-  explains its mixed write amplification of 44.6 (481 MB of compaction for 11.6 MB written).
-  This background work runs on another thread, outside the measured operations.
+  compactions wrote 133 MB: its seek-triggered compactions, which compact a table that reads keep
+  having to look into before finding their key in a deeper level. The same explains its mixed
+  write amplification of 44.7. This work runs on another thread, outside the measured operations.
 - **SQLite** is a B-tree with one transaction per write here, so every write rewrites at least
-  one 4 KiB page into its log: write amplification 54–115, and 6–21K writes per second. Its
-  scans are fast (2.26M entries/s): a B-tree keeps each key once, in order.
+  one 4 KiB page into its log: write amplification 54–115, and 6–27K writes per second. Its
+  scans are fast (2.35M entries/s): a B-tree keeps each key once, in order.
 
-## Results: synced writes (2026-11-02)
+## Results: synced writes (2026-11-05)
 
-**Run.** Commit 8821349 (the engines' code is that of the unsynced run), the same laptop, now as
-the method asks: High performance power plan, AC power, the database folder excluded from
-Defender's scanning (confirmed), and the runs interleaved across engines. The four write
-workloads, 20,000 keys, every write synced; 5 runs each.
+The same run: the four write workloads, 20,000 keys, every write synced; 5 runs each.
 
 | ops/s | ForgeDB | RocksDB | LevelDB | SQLite |
 |---|---|---|---|---|
-| fillseq, median [min–max] | 1,762 [1,724–2,000] | 1,704 [1,550–1,888] | 749 [599–1,750] | 1,635 [1,445–1,638] |
-| fillrandom | 1,735 [1,704–1,739] | 1,705 [1,666–1,710] | 780 [712–891] | 1,346 [1,139–1,592] |
-| overwrite | 852 [704–1,841] | 794 [639–908] | 1,260 [830–1,701] | 1,548 [638–1,593] |
-| mixed (10% synced writes) | 16.7K [5,890–17.5K] | 16.5K [3,985–17.8K] | 5,630 [4,556–16.5K] | 15.3K [4,250–15.7K] |
+| fillseq, median [min–max] | 1,693 [835–1,758] | 1,685 [1,129–1,716] | 715 [485–1,677] | 1,269 [531–1,590] |
+| fillrandom | 1,675 [1,650–1,739] | 1,671 [1,189–1,681] | 734 [671–897] | 1,506 [1,086–1,557] |
+| overwrite | 806 [712–1,718] | 723 [642–798] | 1,633 [816–1,701] | 1,573 [1,560–1,610] |
+| mixed (10% synced writes) | 16.7K [3,957–17.6K] | 11.3K [4,571–16.6K] | 16.0K [4,103–16.5K] | 15.7K [15.3K–15.9K] |
 
 ![Throughput, synced](benchmarks/throughput-synced.png)
 
 **What these numbers measure: mostly the SSD.** A synced write waits for `FlushFileBuffers`, and
-on this machine that wait comes in two sizes: about 0.5–0.6 ms (the typical write in most runs,
-for every engine) or about 2–3 ms, and the share of slow ones changes from run to run, which is
-what the wide ranges show. It is not one engine's doing: ForgeDB alone, run after run, went from
-28 s to 77–86 s for the same work in the first full run; and interleaving the engines did not
-make it fall evenly. In this run the fills were slow for LevelDB in 9 of 10 runs while the
-other engines' runs between them were mostly fast; in the first run it was the other way round. The
-cause is not known (the drive's own background work is one candidate), so the medians above say
-which runs the slow flushes landed in, not how fast an engine is.
+on this machine that wait comes in two sizes: about 0.5–0.6 ms, or about 2–3 ms. A run whose
+writes mostly wait the short time does about 1,600–1,750 writes per second, whatever the engine;
+a run with many long waits, 500–900. The medians therefore mostly say which runs the long waits
+fell in. Where they fall is not plain noise, though: in both interleaved runs (2026-11-02 and
+this one) they hit LevelDB's fills in 9 of 10 runs, RocksDB's overwrites in every run, ForgeDB's
+overwrites in 3 and 4 of 5 and SQLite's overwrites in 2 and 0 of 5, with other engines' runs
+fast in between. In the first run, which ran each engine's runs back to back, it was nearly the other way
+round. The cause is not known. One hypothesis for overwrite, where the LSM engines flush their
+write buffer partway through (40,000 writes in all) and SQLite has nothing to flush: a flush's
+table write and sync slow the log syncs beside it. Finding out needs a disk-level trace (ETW),
+not done.
 
 **What does hold.** When the flushes are fast, every engine is held to the drive's flush time:
-the best runs are within 20% of each other (fillseq: ForgeDB 2,000 writes/s, RocksDB 1,888,
-LevelDB 1,750, SQLite 1,638), at a typical 0.49–0.59 ms per write, with ForgeDB at the top of
-that range. Write amplification is 1.19 for the three LSM engines in the fills
+the best fillseq runs are within 10% of each other (ForgeDB 1,758 writes/s, RocksDB 1,716,
+LevelDB 1,677, SQLite 1,590). Write amplification is 1.19 for the three LSM engines in the fills
 (just the log; 20,000 keys never fill a write buffer) and 54–78 for SQLite.
 
-**Space after synced overwrite: ForgeDB 3.78, LevelDB 2.11, RocksDB 1.64.** At this size one
-flush has happened, and ForgeDB keeps the log that flush retired until the next MANIFEST
-record (ADR 0007), as well as the current one; LevelDB deletes the old log after the flush. The
-same retired log, up to one write buffer's worth, is a lead for the 13% in the unsynced results.
+**Space after synced overwrite: ForgeDB 3.78, LevelDB 2.11, RocksDB 1.64.** At this size one flush
+has happened, and ForgeDB keeps the log that flush retired as well as the current one (the lead
+for the space amplification above).
 
 ## Phase 5.3: two optimizations
 
@@ -135,10 +141,10 @@ Profiled with `scripts\cpu-profile.ps1` (Visual Studio's CPU sampling, Release b
 symbols), then measured with `bench.ps1 -Modes unsynced -Engines forgedb`: ForgeDB alone,
 1,000,000 keys, 5 runs, median. **Before:** commit 45b186f, 2026-11-03 (High performance plan;
 Defender exclusion not confirmed). **After:** commit e016e15, 2026-11-04 (Balanced plan; the
-exclusion confirmed). The settings differ between the two runs; the first full run showed
-ForgeDB within a percent or two on Balanced and High performance (readrandom 90.0K and 89.6K
-ops/s), and the workloads neither change touches stayed within 2% here, so the differences
-below are the changes'.
+exclusion confirmed). Absolute numbers move between days on this laptop: the final run
+(2026-11-05, High performance) measured ForgeDB 6–18% above the "after" run even where neither
+change applies (readmissing 436K vs 370K). The comparison below rests on the workloads neither
+change touches staying within 2% between these two runs (readmissing, fillrandom, overwrite).
 
 | ForgeDB, unsynced | before | after | change |
 |---|---|---|---|
@@ -193,11 +199,8 @@ tests per preset, including new tests for each change).
 
 ### Still behind
 
-These numbers compare ForgeDB with itself; the other engines are measured again in the final run.
-Against the first run's figures, LevelDB's point reads (344K ops/s) and seeks (142K) are still
-ahead of ForgeDB's 137.5K and 53.9K. Where the rest of that gap comes from has not been profiled
-yet; one difference is known: LevelDB hands out pointers into its mapping and skips the copy and
-the block cache, which ForgeDB keeps for its error handling.
+In the final run, ForgeDB's point reads (188K ops/s) and seeks (59.8K) are second only to
+LevelDB's (351K and 142K); see [where ForgeDB loses](#where-forgedb-loses-and-why).
 
 ## Running them
 
