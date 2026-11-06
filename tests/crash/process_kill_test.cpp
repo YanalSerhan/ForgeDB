@@ -8,10 +8,14 @@
 //     batch than the side file shows (acknowledged, killed before recording);
 //   - keys from every earlier run are all still there.
 //
-// The random wait also kills the child while it opens the database, during
-// recovery. This covers process crashes only: data the OS has accepted
-// survives them. Power loss is covered by the fault-injection model
-// (crash_torture_test.cpp), not here.
+// A quarter of the kills come at a random moment soon after the child starts,
+// so some land while it opens the database, during recovery. The rest come at a
+// random moment after its first acknowledged write, however long the machine
+// takes to get there: a CI runner once took more than 300 ms in every run.
+//
+// This covers process crashes only: data the OS has accepted survives them.
+// Power loss is covered by the fault-injection model (crash_torture_test.cpp),
+// not here.
 //
 // Run-time overrides:
 //   FORGEDB_KILL_RUNS=500   kill runs (default: see CMakeLists.txt)
@@ -58,6 +62,10 @@ using process_kill::ValueFor;
 // A fresh database every so many runs: Phase 2 never deletes logs, and every
 // open replays all of them.
 constexpr std::uint64_t kRunsPerDatabase = 25;
+
+// How long a child may take to acknowledge its first write before the test
+// gives up on it (it should take milliseconds; this only catches a hang).
+constexpr ULONGLONG kFirstWriteTimeoutMs = 60'000;
 
 std::filesystem::path ChildPath() {
   std::wstring buffer(32768, L'\0');
@@ -106,6 +114,55 @@ std::vector<std::string> CompleteLines(const std::filesystem::path& path) {
     start = newline + 1;
   }
   return lines;
+}
+
+enum class FirstWrite : std::uint8_t { kSeen, kChildExited, kTimedOut };
+
+// Waits until the side file has a complete line: the child has acknowledged a
+// write. Reads the file rather than asking for its size, which Windows may
+// not update while another process has the file open.
+FirstWrite WaitForFirstWrite(HANDLE process, const std::filesystem::path& side_file,
+                             ULONGLONG timeout_ms) {
+  const ULONGLONG deadline = ::GetTickCount64() + timeout_ms;
+  while (CompleteLines(side_file).empty()) {
+    if (::WaitForSingleObject(process, 1) == WAIT_OBJECT_0) {
+      return FirstWrite::kChildExited;
+    }
+    if (::GetTickCount64() >= deadline) {
+      return FirstWrite::kTimedOut;
+    }
+  }
+  return FirstWrite::kSeen;
+}
+
+// Kills the child at a random moment: a quarter of the time soon after it
+// starts (during its open and recovery, or before), otherwise in the middle of
+// its writes, timed from its first acknowledged write. Returns once the child
+// is gone: "" or what went wrong.
+std::string KillAtRandomMoment(HANDLE process, const std::filesystem::path& side_file,
+                               std::mt19937_64& rng) {
+  const bool early = rng() % 4 == 0;
+  if (!early &&
+      WaitForFirstWrite(process, side_file, kFirstWriteTimeoutMs) == FirstWrite::kTimedOut) {
+    ::TerminateProcess(process, 99);
+    ::WaitForSingleObject(process, INFINITE);
+    return "the child acknowledged no write within " + std::to_string(kFirstWriteTimeoutMs) +
+           " ms of starting";
+  }
+  const auto wait_ms = static_cast<DWORD>(early ? rng() % 30 : rng() % 270);
+  if (::WaitForSingleObject(process, wait_ms) == WAIT_OBJECT_0) {
+    DWORD code = 0;
+    ::GetExitCodeProcess(process, &code);
+    return "the child exited on its own with code " + std::to_string(code) +
+           " (see its stderr above)";
+  }
+  if (::TerminateProcess(process, 99) == FALSE) {
+    return "TerminateProcess failed: " + std::to_string(::GetLastError());
+  }
+  if (::WaitForSingleObject(process, INFINITE) != WAIT_OBJECT_0) {
+    return "waiting for the killed child failed: " + std::to_string(::GetLastError());
+  }
+  return "";
 }
 
 // Keys per run in the database, after checking every value.
@@ -171,17 +228,9 @@ TEST(ProcessKillTest, AcknowledgedSyncedWritesSurviveTerminateProcess) {
     const UniqueHandle process(info.hProcess);
     const UniqueHandle thread(info.hThread);
 
-    // 2. Kill it at a random moment: a quarter of the time early, while it
-    //    starts and recovers; otherwise in the middle of its writes.
-    const auto wait_ms = static_cast<DWORD>(rng() % 4 == 0 ? rng() % 30 : 30 + (rng() % 270));
-    if (::WaitForSingleObject(process.Get(), wait_ms) == WAIT_OBJECT_0) {
-      DWORD code = 0;
-      ::GetExitCodeProcess(process.Get(), &code);
-      FAIL() << "the child exited on its own with code " << code << " (see its stderr above)";
-    }
-    ASSERT_NE(::TerminateProcess(process.Get(), 99), FALSE)
-        << "TerminateProcess failed: " << ::GetLastError();
-    ASSERT_EQ(::WaitForSingleObject(process.Get(), INFINITE), WAIT_OBJECT_0);
+    // 2. Kill it at a random moment.
+    const std::string kill_problem = KillAtRandomMoment(process.Get(), side_file, rng);
+    ASSERT_EQ(kill_problem, "");
 
     // 3. Reopen and check.
     const std::vector<std::string> lines = CompleteLines(side_file);
